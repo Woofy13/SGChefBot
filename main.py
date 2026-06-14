@@ -3,6 +3,8 @@ import sys
 import os
 import asyncio
 import threading
+import time
+from datetime import date
 from http.server import HTTPServer, BaseHTTPRequestHandler
 sys.path.insert(0, os.path.dirname(__file__))
 
@@ -38,6 +40,23 @@ def run_health_server():
     server.serve_forever()
 
 
+def expiry_reminder_loop(token):
+    import asyncio
+    from bot import send_monthly_reminders
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    sent = set()
+    while True:
+        time.sleep(43200)
+        today_key = date.today().isoformat()
+        if date.today().day == 1 and today_key not in sent:
+            try:
+                loop.run_until_complete(send_monthly_reminders(token))
+                sent.add(today_key)
+            except Exception as e:
+                print(f"Expiry reminder error: {e}")
+
+
 def main():
     if not TELEGRAM_BOT_TOKEN:
         print("ERROR: TELEGRAM_BOT_TOKEN not set. Create a .env file or set the env variable.")
@@ -49,6 +68,9 @@ def main():
 
     health_thread = threading.Thread(target=run_health_server, daemon=True)
     health_thread.start()
+
+    reminder_thread = threading.Thread(target=expiry_reminder_loop, args=(TELEGRAM_BOT_TOKEN,), daemon=True)
+    reminder_thread.start()
 
     init_db()
     print("Database initialized")

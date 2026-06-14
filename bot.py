@@ -6,7 +6,7 @@ import os
 import tempfile
 import json
 import re
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -41,6 +41,114 @@ _cook_state = {}  # user_id -> {"title": str, "ingredients": list[str], "steps":
 # Track whether the recipe in _last_suggestion is already saved (hide Save button)
 _is_saved_recipe = {}
 
+# Receipt scan state
+_receipt_items = {}  # {user_id: {"items": [{"name": str, "expiry": str}, ...], "msg_id": int}}
+
+
+def _fmt_date(iso_str):
+    if not iso_str or len(iso_str) < 10:
+        return iso_str or ""
+    return iso_str[8:10] + "/" + iso_str[5:7] + "/" + iso_str[2:4]
+
+
+_DAY_NAMES = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3, "friday": 4, "saturday": 5, "sunday": 6}
+_MONTH_NAMES = {"jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3, "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7, "aug": 8, "august": 8, "sep": 9, "september": 9, "oct": 10, "october": 10, "nov": 11, "november": 11, "dec": 12, "december": 12}
+
+
+def _parse_expiry(text):
+    if not text:
+        return ""
+    text = text.strip().lower()
+    today = date.today()
+
+    m = re.search(r'(\d{1,2})\s*/\s*(\d{1,2})(?:\s*/\s*(\d{2,4}))?', text)
+    if m:
+        day, month = int(m.group(1)), int(m.group(2))
+        if month > 12:
+            day, month = month, day
+        year = int(m.group(3)) if m.group(3) else today.year
+        if year < 100:
+            year += 2000
+        try:
+            return date(year, month, day).isoformat()
+        except ValueError:
+            pass
+
+    m = re.search(r'(\d{1,2})\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*(?:\s+(\d{2,4}))?', text)
+    if m:
+        day, month_name = int(m.group(1)), m.group(2)
+        month = _MONTH_NAMES.get(month_name[:3], today.month)
+        year = int(m.group(3)) if m.group(3) else today.year
+        if year < 100:
+            year += 2000
+        try:
+            return date(year, month, day).isoformat()
+        except ValueError:
+            pass
+
+    m = re.search(r'(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+(\d{1,2})(?:\s*,?\s*(\d{2,4}))?', text)
+    if m:
+        month = _MONTH_NAMES.get(m.group(1)[:3], today.month)
+        day = int(m.group(2))
+        year = int(m.group(3)) if m.group(3) else today.year
+        if year < 100:
+            year += 2000
+        try:
+            return date(year, month, day).isoformat()
+        except ValueError:
+            pass
+
+    m = re.search(r'next\s+(\w+)', text)
+    if m:
+        key = m.group(1).lower()
+        if key in _DAY_NAMES:
+            target = _DAY_NAMES[key]
+            days_ahead = target - today.weekday()
+            if days_ahead <= 0:
+                days_ahead += 7
+            return (today + timedelta(days=days_ahead)).isoformat()
+        elif key == "week":
+            return (today + timedelta(days=7)).isoformat()
+        elif key == "month":
+            return (today + timedelta(days=30)).isoformat()
+
+    m = re.search(r'(?:in\s+)?(\d+)\s*(day|days|week|weeks|month|months)', text)
+    if m:
+        amount = int(m.group(1))
+        unit = m.group(2).lower()
+        if unit.startswith("day"):
+            return (today + timedelta(days=amount)).isoformat()
+        elif unit.startswith("week"):
+            return (today + timedelta(days=amount * 7)).isoformat()
+        elif unit.startswith("month"):
+            return (today + timedelta(days=amount * 30)).isoformat()
+
+    return ""
+
+
+def _render_receipt(user_id):
+    data = _receipt_items.get(user_id)
+    if not data or not data["items"]:
+        return None, None
+    lines = ["\U0001f9fe Scanned receipt \u2014 found these items:", ""]
+    for i, item in enumerate(data["items"], 1):
+        name = item["name"].title()
+        exp = item.get("expiry", "")
+        if exp:
+            remaining = (date.fromisoformat(exp) - date.today()).days
+            lines.append(f"{i}. {name} \u2014 exp {_fmt_date(exp)} ({remaining}d)")
+        else:
+            lines.append(f"{i}. {name}")
+    lines.append("")
+    lines.append("Reply:")
+    lines.append("  'remove <name>' to remove item")
+    lines.append("  'expiry <number> <date>' to set expiry")
+    lines.append("  or tap \u2705 Confirm")
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("\u2705 Confirm", callback_data="receipt_confirm")]
+    ])
+    return "\n".join(lines), keyboard
+
 
 def _format_recipe(recipe):
     if recipe.get("full_text"):
@@ -66,45 +174,53 @@ def _format_recipe(recipe):
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    db.store_chat_id(update.effective_user.id, update.effective_chat.id)
     text = (
-        "SG Chef Bot - your personal kitchen assistant\n\n"
-        "Just chat naturally - try:\n"
-        '"add chicken and rice to my pantry"\n'
-        '"whats in my pantry?"\n'
-        '"suggest fried chicken for air fryer"\n'
-        '"swap chicken for tofu" (on an elaborated recipe)\n'
-        '"make this for 2 people" (scale a recipe)\n'
-        '"what can i cook?"\n'
-        '"save recipe for braised pork rice"\n'
-        '"log chicken rice for lunch"\n'
-        '"how many calories today?"\n'
-        '"show my recipes"\n'
-        '"show recipe 1"\n'
-        '"i have an air fryer and rice cooker"\n\n'
-        "Or use commands:\n"
-        "/pantry - show your pantry\n"
-        "/add chicken, rice - add items\n"
-        "/remove milk - remove item\n"
-        "/equipment air fryer, oven - save your kitchen gear\n"
-        "/diet keto - set a diet profile (all suggestions adapt)\n"
-        "/diet all - reset to normal diet\n"
-        "/recategorize - fix item categories\n"
-        "/expiring - items expiring soon\n"
-        "/suggest - AI recipe suggestions\n"
-        "/save <name> - save a new recipe\n"
-        "/recipes - list saved recipes\n"
-        "/view <id> - view a saved recipe\n"
-        "/export <name> - export a recipe as a file\n"
-        "/canbake - cook with only whats on hand\n"
-        "/batch - plan a multi-dish meal with cooking timeline\n"
-        "/cookmode - step-by-step cooking mode on the last recipe\n"
-        "/log chicken rice - log a meal\n"
-        "/calories - todays nutrition\n"
-        "/nutrition chicken - lookup nutrition\n"
-        "/goal - set daily targets\n"
-        "/weekly - weekly summary\n"
-        "/shopping <recipe> - generate shopping list\n\n"
-        "You can send voice messages too!"
+        "SG Chef Bot \u2014 your personal kitchen assistant\n\n"
+        "Just chat naturally:\n\n"
+        '  "add chicken and rice to my pantry"\n'
+        '  "add chicken expiring 15/07/25" (or "add beef 3 days")\n'
+        '  "whats in my pantry?"\n'
+        '  "suggest fried chicken for air fryer"\n'
+        '  "swap chicken for tofu" (on a recipe)\n'
+        '  "make this for 2 people" (scale a recipe)\n'
+        '  "log chicken rice for lunch"\n'
+        '  "how many calories today?"\n'
+        '  "save recipe for braised pork rice"\n\n'
+        "\u2500\u2500\u2500 Pantry \u2500\u2500\u2500\n\n"
+        "  /add chicken, rice, 15/07/25     add items (with optional expiry)\n"
+        "  /remove milk                     remove an item\n"
+        "  /pantry                          show your pantry\n"
+        "  /expiring [days]                 items expiring soon\n"
+        "  /recategorize                    fix item categories\n"
+        "  /expiryremind on/off             toggle monthly expiry reminders\n\n"
+        "\u2500\u2500\u2500 Recipes & Cooking \u2500\u2500\u2500\n\n"
+        "  /suggest [preference]            AI recipe suggestions\n"
+        "  /canbake                         cook with only what you have\n"
+        "  /save <name>                     save a new recipe\n"
+        "  /recipes                         list saved recipes\n"
+        "  /view <id>                       view a saved recipe\n"
+        "  /delete <id>                     delete a recipe\n"
+        "  /export <name>                   export as a file\n"
+        "  /batch [count]                   plan a multi-dish meal\n"
+        "  /cookmode                        step-by-step cooking mode\n\n"
+        "\u2500\u2500\u2500 Shopping List \u2500\u2500\u2500\n\n"
+        "  /shopping <recipe>               auto-add missing ingredients\n"
+        "  /shop milk, eggs                 add items to your list\n"
+        "  /list                            view & check off items\n"
+        "  /shopremove milk                 remove an item\n"
+        "  /shopclear                       clear the entire list\n\n"
+        "\u2500\u2500\u2500 Nutrition & Tracking \u2500\u2500\u2500\n\n"
+        "  /log chicken rice, lunch         log a meal\n"
+        "  /calories                        today's nutrition totals\n"
+        "  /nutrition chicken               lookup per 100g\n"
+        "  /goal 1900 120 2300              set daily targets\n"
+        "  /weekly                          weekly summary\n\n"
+        "\u2500\u2500\u2500 Settings \u2500\u2500\u2500\n\n"
+        "  /equipment air fryer, oven       save your kitchen gear\n"
+        "  /diet keto                       set a diet profile\n"
+        "  /diet all                        reset to normal\n\n"
+        "You can also send voice messages and photos!"
     )
     await update.message.reply_text(text)
 
@@ -114,12 +230,30 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def add_pantry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if not args:
-        await update.message.reply_text("Usage: `/add chicken, rice, broccoli`")
+        await update.message.reply_text("Usage: `/add chicken, rice, broccoli`\nYou can also add expiry: `/add chicken 15/07/25`")
         return
-    items = [x.strip() for x in " ".join(args).split(",") if x.strip()]
+    raw = " ".join(args)
+    expiry = _parse_expiry(raw)
+    items = [x.strip() for x in raw.split(",") if x.strip()]
+    clean_items = []
     for item in items:
-        db.add_pantry_item(update.effective_user.id, item)
-    await update.message.reply_text(f"Added {len(items)} item(s) to pantry: {', '.join(items)}")
+        cleaned = re.sub(r'\b\d{1,2}\s*/\s*\d{1,2}(?:\s*/\s*\d{2,4})?\b', '', item).strip()
+        cleaned = re.sub(r'\b(expires?|use\s+by|best\s+before|bb)[:\s]*', '', cleaned, flags=re.I).strip()
+        cleaned = re.sub(r'\b(next\s+\w+)', '', cleaned, flags=re.I).strip()
+        cleaned = re.sub(r'\b\d{1,2}\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*', '', cleaned, flags=re.I).strip()
+        cleaned = re.sub(r'\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{1,2}', '', cleaned, flags=re.I).strip()
+        cleaned = cleaned.strip(", \t")
+        if cleaned:
+            clean_items.append(cleaned)
+    if not clean_items:
+        await update.message.reply_text("Could not identify items to add. Try: `/add chicken, rice`")
+        return
+    for item in clean_items:
+        db.add_pantry_item(update.effective_user.id, item, expiry=expiry)
+    reply = f"Added {len(clean_items)} item(s): {', '.join(clean_items)}"
+    if expiry:
+        reply += f" (exp {_fmt_date(expiry)})"
+    await update.message.reply_text(reply)
 
 
 async def recategorize(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -278,8 +412,44 @@ async def expiring(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     lines = [f"⚠️ *Items expiring within {days} days:*"]
     for item in items:
-        lines.append(f"• {item['name'].title()} — expires {item['expiry_date']}")
+        d = _fmt_date(item['expiry_date'])
+        remaining = (datetime.strptime(item['expiry_date'], "%Y-%m-%d").date() - date.today()).days
+        days_str = f" ({remaining} days left)" if remaining >= 0 else ""
+        lines.append(f"• {item['name'].title()} — expires {d}{days_str}")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+async def expiry_remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    args = context.args
+    if args and args[0].lower() in ("off", "disable", "no"):
+        db.set_user_preference(user_id, "expiry_reminder", "off")
+        await update.message.reply_text("Monthly expiry reminders turned off.")
+    else:
+        db.set_user_preference(user_id, "expiry_reminder", "")
+        await update.message.reply_text("Monthly expiry reminders turned on. You'll be notified on the 1st of each month about items expiring that month.")
+
+
+async def send_monthly_reminders(token):
+    from telegram import Bot
+    bot = Bot(token)
+    today = date.today()
+    users = db.get_users_for_reminder(today.year, today.month)
+    for user_id, chat_id in users:
+        items = db.get_expiring_items_in_month(user_id, today.year, today.month)
+        if not items:
+            continue
+        month_name = today.strftime("%B %Y")
+        lines = [f"⚠️ *Items expiring this month ({month_name}):*"]
+        for item in items:
+            d = _fmt_date(item['expiry_date'])
+            remaining = (datetime.strptime(item['expiry_date'], "%Y-%m-%d").date() - today).days
+            days_str = f" ({remaining} days left)" if remaining >= 0 else ""
+            lines.append(f"• {item['name'].title()} — expires {d}{days_str}")
+        try:
+            await bot.send_message(chat_id=int(chat_id), text="\n".join(lines), parse_mode="Markdown")
+        except Exception as e:
+            logger.warning(f"Failed to send expiry reminder to user {user_id}: {e}")
 
 
 # --- Recipes ---
@@ -1113,22 +1283,32 @@ async def weekly(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- Shopping ---
 
 async def shopping(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args
-    if not args:
-        await update.message.reply_text("Usage: `/shopping Braised Beef Kolo Mee`", parse_mode="Markdown")
-        return
-    title = " ".join(args)
     user_id = update.effective_user.id
+    args = context.args
+    title = " ".join(args) if args else ""
 
-    recipe = db.get_recipe_by_title(user_id, title)
-    if not recipe:
-        await update.message.reply_text(f"Recipe '{title}' not found. Use `/recipes` to see saved recipes.", parse_mode="Markdown")
-        return
+    if title:
+        recipe = db.get_recipe_by_title(user_id, title)
+        if not recipe:
+            await update.message.reply_text(f"Recipe '{title}' not found. Use `/recipes` to see saved recipes.", parse_mode="Markdown")
+            return
+        ingredients = recipe["ingredients"]
+        title = recipe["title"]
+    else:
+        last_text = _last_suggestion.get(user_id, "")
+        if not last_text:
+            await update.message.reply_text("No recipe to shop for. Use `/shopping <recipe name>` or get a suggestion first.", parse_mode="Markdown")
+            return
+        await update.message.reply_text("🛒 Extracting ingredients from last suggestion...")
+        ingredients = ai.parse_ingredients_from_text(last_text)
+        title = "last suggested recipe"
+        if isinstance(ingredients, str):
+            await update.message.reply_text(ingredients)
+            return
 
     pantry_names = set(db.get_pantry_names(user_id))
     missing = []
-    for ing in recipe["ingredients"]:
-        # Simple check — ingredient name is the first word(s) before any comma or parentheses
+    for ing in ingredients:
         ing_key = ing.split(",")[0].split("(")[0].strip().lower()
         if not any(p in ing_key for p in pantry_names):
             missing.append(ing)
@@ -1137,12 +1317,56 @@ async def shopping(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ You have all the ingredients! Time to cook.")
         return
 
+    for item in missing:
+        db.add_to_shopping_list(user_id, item.split(",")[0].split("(")[0].strip())
+
     msg = await update.message.reply_text("🛒 Generating shopping list...")
     result = ai.generate_shopping_list(title, missing)
+    shop = db.get_shopping_list(user_id)
+    shop_count = len([s for s in shop if not s["checked"]])
     await msg.edit_text(
-        f"🛒 *Shopping List for {title}*\n{result}",
+        f"🛒 *Shopping List for {title}*\n{result}\n\n"
+        f"📋 {shop_count} item(s) in your shopping list. Use `/list` to view.",
         parse_mode="Markdown",
     )
+
+
+async def shop_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    args = context.args
+    if not args:
+        await update.message.reply_text("Usage: `/shop milk, eggs, chicken`")
+        return
+    items = [x.strip().lower() for x in " ".join(args).split(",") if x.strip()]
+    for item in items:
+        db.add_to_shopping_list(user_id, item)
+    await update.message.reply_text(f"📋 Added {len(items)} item(s) to your shopping list: {', '.join(items)}\nUse `/list` to view.")
+
+
+async def list_shopping(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    text, keyboard = _render_shopping_list(user_id)
+    if not text:
+        await update.message.reply_text("📋 Shopping list is empty. Use `/shop milk, eggs` to add items.")
+        return
+    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=keyboard)
+
+
+async def shop_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    args = context.args
+    if not args:
+        await update.message.reply_text("Usage: `/shopremove milk`")
+        return
+    item = " ".join(args).strip().lower()
+    db.remove_from_shopping_list(user_id, item)
+    await update.message.reply_text(f"🗑 Removed `{item}` from your shopping list.", parse_mode="Markdown")
+
+
+async def shop_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    db.clear_shopping_list(user_id)
+    await update.message.reply_text("🗑 Shopping list cleared.")
 
 
 # --- Natural language handler ---
@@ -1253,8 +1477,11 @@ async def _handle_user_text(update, context, user_id, text):
     reply = result.get("message", "")
 
     if action == "add":
+        expiry = _parse_expiry(result.get("expiry_date", ""))
         for item in items:
-            db.add_pantry_item(user_id, item)
+            db.add_pantry_item(user_id, item, expiry=expiry)
+        if expiry and reply and "(exp" not in reply:
+            reply += f" (exp {_fmt_date(expiry)})"
         await msg.edit_text(reply)
 
     elif action == "remove":
@@ -1288,7 +1515,10 @@ async def _handle_user_text(update, context, user_id, text):
             return
         lines = ["Expiring soon:"]
         for it in ex:
-            lines.append(f"- {it['name'].title()} (expires {it['expiry_date']})")
+            d = _fmt_date(it['expiry_date'])
+            remaining = (datetime.strptime(it['expiry_date'], "%Y-%m-%d").date() - date.today()).days
+            days_str = f" ({remaining} days left)" if remaining >= 0 else ""
+            lines.append(f"- {it['name'].title()} (expires {d}){days_str}")
         await msg.edit_text("\n".join(lines))
 
     elif action == "suggest":
@@ -1402,6 +1632,9 @@ async def _handle_user_text(update, context, user_id, text):
                 "Recipe not found. Say 'show my recipes' to see your saved recipes."
             )
 
+    elif action == "scan_receipt":
+        await msg.edit_text("Send me a photo of your receipt with the caption 'scan receipt'!")
+
     elif action == "help":
         await msg.delete()
         await start(update, context)
@@ -1420,12 +1653,82 @@ async def _handle_user_text(update, context, user_id, text):
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    db.store_chat_id(user_id, update.effective_chat.id)
     text = update.message.text.strip()
+
+    receipt_state = _receipt_items.get(user_id)
+    if receipt_state and receipt_state["items"]:
+        t = text.lower().strip()
+
+        if t.startswith("remove "):
+            name = t[7:].strip()
+            before = len(receipt_state["items"])
+            receipt_state["items"] = [i for i in receipt_state["items"] if i["name"] != name]
+            if len(receipt_state["items"]) < before:
+                if not receipt_state["items"]:
+                    _receipt_items.pop(user_id, None)
+                    await update.message.reply_text("All items removed. Receipt scan cancelled.")
+                    return
+                text, keyboard = _render_receipt(user_id)
+                await context.bot.edit_message_text(text,
+                    chat_id=update.effective_chat.id, message_id=receipt_state["msg_id"],
+                    reply_markup=keyboard)
+                status = await update.message.reply_text(f"\u274c Removed {name.title()}.")
+                await status.delete()
+                return
+            else:
+                await update.message.reply_text(f"Item '{name}' not found in the list.")
+                return
+
+        m = re.match(r'expiry\s+(\d+)\s+(.+)', t)
+        if m:
+            idx = int(m.group(1)) - 1
+            date_input = m.group(2).strip()
+            if 0 <= idx < len(receipt_state["items"]):
+                parsed = _parse_expiry(date_input)
+                if parsed:
+                    receipt_state["items"][idx]["expiry"] = parsed
+                    text, keyboard = _render_receipt(user_id)
+                    await context.bot.edit_message_text(text,
+                        chat_id=update.effective_chat.id, message_id=receipt_state["msg_id"],
+                        reply_markup=keyboard)
+                    status = await update.message.reply_text(f"\u2705 Updated expiry for item #{idx+1}.")
+                    await status.delete()
+                else:
+                    await update.message.reply_text("Could not parse that date. Try '3 days', '15/07/25', 'next friday'.")
+            else:
+                await update.message.reply_text(f"Item #{idx+1} doesn't exist. There are {len(receipt_state['items'])} items.")
+            return
+
     await _handle_user_text(update, context, user_id, text)
 
 
 # --- Photo recognition ---
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    db.store_chat_id(update.effective_user.id, update.effective_chat.id)
+    user_id = update.effective_user.id
+    caption = (update.message.caption or "").lower()
+    is_receipt = any(w in caption for w in ["receipt", "scan", "recipt"])
+
+    if is_receipt:
+        msg = await update.message.reply_text("\U0001f9fe Scanning receipt...")
+        try:
+            photo = update.message.photo[-1]
+            file = await photo.get_file()
+            file_bytes = await file.download_as_bytearray()
+            b64 = base64.b64encode(file_bytes).decode("utf-8")
+            names = ai.scan_receipt_from_image(b64)
+            if not names:
+                await msg.edit_text("Could not read items from this receipt. Try a clearer photo.")
+                return
+            items = [{"name": n.strip().lower(), "expiry": ""} for n in names if n.strip()]
+            _receipt_items[user_id] = {"items": items, "msg_id": msg.message_id}
+            text, keyboard = _render_receipt(user_id)
+            await msg.edit_text(text, reply_markup=keyboard)
+        except Exception as e:
+            await msg.edit_text(f"Error scanning receipt: {e}")
+        return
+
     msg = await update.message.reply_text("Analyzing image...")
     try:
         photo = update.message.photo[-1]
@@ -1456,6 +1759,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- Voice ---
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    db.store_chat_id(update.effective_user.id, update.effective_chat.id)
     msg = await update.message.reply_text("Transcribing voice...")
     try:
         file = await update.message.voice.get_file()
@@ -1469,6 +1773,69 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _handle_user_text(update, context, user_id, text)
     except Exception as e:
         await msg.edit_text(f"Voice processing error: {e}")
+
+
+def _render_shopping_list(user_id):
+    items = db.get_shopping_list(user_id)
+    if not items:
+        return None, None
+    unchecked = [i for i in items if not i["checked"]]
+    checked = [i for i in items if i["checked"]]
+    lines = ["📋 *Shopping List*", ""]
+    for item in unchecked:
+        lines.append(f"⬜ {item['name'].title()}")
+    for item in checked:
+        lines.append(f"✅ {item['name'].title()}")
+    lines.append("")
+    lines.append(f"*{len(unchecked)} remaining* · {len(checked)} checked")
+    keyboard = []
+    row = []
+    for item in items:
+        label = "✅" if item["checked"] else "⬜"
+        row.append(InlineKeyboardButton(label, callback_data=f"shop_toggle_{item['id']}"))
+        if len(row) >= 3:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    keyboard.append([InlineKeyboardButton("🗑 Clear checked", callback_data="shop_clear_checked")])
+    return "\n".join(lines), InlineKeyboardMarkup(keyboard)
+
+
+async def shop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    data = query.data
+    if data.startswith("shop_toggle_"):
+        item_id = int(data.split("_")[2])
+        db.toggle_shopping_item(item_id)
+        text, keyboard = _render_shopping_list(user_id)
+        if text:
+            await query.edit_message_text(text, parse_mode="Markdown", reply_markup=keyboard)
+    elif data == "shop_clear_checked":
+        items = db.get_shopping_list(user_id)
+        for item in items:
+            if item["checked"]:
+                db.remove_from_shopping_list(user_id, item["name"])
+        text, keyboard = _render_shopping_list(user_id)
+        if text:
+            await query.edit_message_text(text, parse_mode="Markdown", reply_markup=keyboard)
+
+
+async def receipt_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    data = _receipt_items.pop(user_id, None)
+    if not data or not data["items"]:
+        await query.edit_message_text("Nothing to add.")
+        return
+    added = []
+    for item in data["items"]:
+        db.add_pantry_item(user_id, item["name"], expiry=item.get("expiry", ""))
+        added.append(item["name"].title())
+    await query.edit_message_text(f"\u2705 Added {len(added)} item(s) to pantry: {', '.join(added)}")
 
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1514,7 +1881,12 @@ def create_app(token: str):
     app.add_handler(CommandHandler("goal", goal))
     app.add_handler(CommandHandler("weekly", weekly))
     app.add_handler(CommandHandler("shopping", shopping))
+    app.add_handler(CommandHandler("shop", shop_add))
+    app.add_handler(CommandHandler("list", list_shopping))
+    app.add_handler(CommandHandler("shopremove", shop_remove))
+    app.add_handler(CommandHandler("shopclear", shop_clear))
     app.add_handler(CommandHandler("diet", diet))
+    app.add_handler(CommandHandler("expiryremind", expiry_remind))
     app.add_handler(CommandHandler("export", export_recipe))
     app.add_handler(CommandHandler("batch", batch_start))
     app.add_handler(CommandHandler("cookmode", cookmode))
@@ -1527,6 +1899,8 @@ def create_app(token: str):
     app.add_handler(CallbackQueryHandler(cook_from_recipe_callback, pattern="^cook_recipe$"))
     app.add_handler(CallbackQueryHandler(delete_recipe_callback, pattern="^delrecipe_"))
     app.add_handler(CallbackQueryHandler(view_recipe_callback, pattern="^viewrecipe_"))
+    app.add_handler(CallbackQueryHandler(shop_callback, pattern="^shop_"))
+    app.add_handler(CallbackQueryHandler(receipt_confirm_callback, pattern="^receipt_confirm$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))

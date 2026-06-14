@@ -361,12 +361,15 @@ def process_natural_language(user_message, pantry_items=None, recipes=None):
         f"Pantry: {pantry_str}\n"
         f'Message: "{user_message}"\n\n'
         "Respond with ONLY JSON. No markdown.\n"
-        '{"action":"add"|"remove"|"clear_pantry"|"list_pantry"|"expiring"|"suggest"|"elaborate"|"canbake"|"list_recipes"|"view_recipe"|"delete_recipe"|"save_recipe"|"set_preference"|"help"|"chat",'
+        '{"action":"add"|"remove"|"clear_pantry"|"list_pantry"|"expiring"|"suggest"|"elaborate"|"canbake"|"list_recipes"|"view_recipe"|"delete_recipe"|"save_recipe"|"set_preference"|"scan_receipt"|"help"|"chat",'
         '"items":["item1","item2"],'
+        '"expiry_date":"DD/MM/YY or empty",'
         '"message":"short reply"}\n\n'
         'Use "elaborate" when user picks a dish: "dish 1", "first one", "the chicken one", "tell me more"\n'
+        'When action is "add" and the user mentions a date (e.g. "expires 15/7/25", "use by next Friday", "exp 15 July", "15/07/25"), extract it into expiry_date as DD/MM/YY format. For relative dates like "3 days", "1 week", "2 months", pass them through as-is. Leave empty if no date.\n'
         'Examples:\n'
-        '{"action":"add","items":["chicken","rice"],"message":"Added!"}\n'
+        '{"action":"add","items":["chicken"],"expiry_date":"15/07/25","message":"Added chicken (exp 15/07/25)"}\n'
+        '{"action":"add","items":["milk","eggs"],"expiry_date":"","message":"Added!"}\n'
         '{"action":"suggest","items":[],"message":"Here are some ideas..."}\n'
         '{"action":"elaborate","items":["chicken katsu"],"message":"Let me elaborate..."}'
     )
@@ -442,6 +445,37 @@ def recognize_food_from_image(base64_image):
             "carbs_g_per_100g": 0, "fat_g_per_100g": 0, "sodium_mg_per_100g": 0}
 
 
+def scan_receipt_from_image(base64_image):
+    for model_id in [GROQ_VISION_MODEL, "meta-llama/llama-3.2-11b-vision-instruct",
+                     "llama-3.2-90b-vision-preview"]:
+        try:
+            resp = client.chat.completions.create(
+                model=model_id,
+                messages=[{"role": "user", "content": [
+                    {"type": "text", "text": (
+                        "Extract the food and grocery item names from this receipt photo. "
+                        "Return ONLY a JSON array of strings with just the item names, e.g. "
+                        '["whole milk", "chicken breast", "white rice", "garlic"]. '
+                        "Skip non-food items (cleaning products, plastic bags, toiletries, etc.). "
+                        "Include only edible food and drink items. Normalize names to lower case."
+                    )},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}},
+                ]}],
+                temperature=0.1, max_tokens=500,
+            )
+            text = resp.choices[0].message.content.strip()
+            text = text.replace("```json", "").replace("```", "").strip()
+            start, end = text.find("["), text.rfind("]")
+            if start >= 0 and end > start:
+                text = text[start:end+1]
+            result = json.loads(text)
+            if isinstance(result, list):
+                return result
+        except Exception:
+            continue
+    return []
+
+
 def recipe_followup(recipe_text, user_question):
     prompt = (
         f"Here is the current recipe:\n{recipe_text}\n\n"
@@ -453,6 +487,26 @@ def recipe_followup(recipe_text, user_question):
         return _groq_call(prompt, "You are a helpful chef assistant. Answer questions about the current recipe.", temperature=0.5, max_tokens=600) or f"AI error"
     except Exception as e:
         return f"AI error: {e}"
+
+
+def parse_ingredients_from_text(recipe_text):
+    prompt = (
+        f"Extract the ingredient names from this recipe text. Return ONLY a JSON array of strings, each string is just the ingredient name (no quantities).\n\n"
+        f"Recipe:\n{recipe_text[:2000]}\n\n"
+        'Example: ["chicken breast", "soy sauce", "rice", "garlic"]'
+    )
+    try:
+        text = _groq_call(prompt, "You are a recipe parser. Respond only with JSON array.", temperature=0.1, max_tokens=300)
+        if not text:
+            return ["Error could not parse ingredients"]
+        text = text.strip()
+        text = text.replace("```json", "").replace("```", "").strip()
+        start, end = text.find("["), text.rfind("]")
+        if start >= 0 and end > start:
+            text = text[start:end+1]
+        return json.loads(text)
+    except Exception as e:
+        return f"Could not parse ingredients: {e}"
 
 
 def generate_shopping_list(recipe_title, missing_ingredients):

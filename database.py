@@ -127,9 +127,21 @@ def _init_sqlite():
             value TEXT NOT NULL,
             PRIMARY KEY (user_id, key)
         );
+        CREATE TABLE IF NOT EXISTS shopping_list (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            name TEXT NOT NULL COLLATE NOCASE,
+            quantity TEXT DEFAULT '',
+            added_date TEXT DEFAULT (date('now')),
+            checked INTEGER DEFAULT 0,
+            UNIQUE(user_id, name)
+        );
     """)
     try:
         _execute(conn, "ALTER TABLE recipes ADD COLUMN full_text TEXT DEFAULT ''")
+    except Exception:
+        pass
+
     except Exception:
         pass
     _commit(conn)
@@ -194,6 +206,16 @@ def _init_pg():
             key TEXT NOT NULL,
             value TEXT NOT NULL,
             PRIMARY KEY (user_id, key)
+        );
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS shopping_list (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            quantity TEXT DEFAULT '',
+            added_date TEXT DEFAULT (CURRENT_DATE),
+            checked INTEGER DEFAULT 0
         );
     """)
     _commit(conn)
@@ -306,6 +328,42 @@ def get_expiring_items(user_id, days=3):
     rows = _fetchall(cur)
     _close(conn)
     return rows
+
+
+def store_chat_id(user_id, chat_id):
+    set_user_preference(user_id, "chat_id", str(chat_id))
+
+
+def get_expiring_items_in_month(user_id, year, month):
+    start = f"{year:04d}-{month:02d}-01"
+    if month == 12:
+        end = f"{year + 1:04d}-01-01"
+    else:
+        end = f"{year:04d}-{month + 1:02d}-01"
+    conn = get_connection()
+    cur = _execute(conn,
+        _q("SELECT name, quantity, unit, expiry_date FROM pantry WHERE user_id = ? AND expiry_date IS NOT NULL AND expiry_date >= ? AND expiry_date < ? ORDER BY expiry_date"),
+        (user_id, start, end),
+    )
+    rows = _fetchall(cur)
+    _close(conn)
+    return rows
+
+
+def get_users_for_reminder(year, month):
+    start = f"{year:04d}-{month:02d}-01"
+    if month == 12:
+        end = f"{year + 1:04d}-01-01"
+    else:
+        end = f"{year:04d}-{month + 1:02d}-01"
+    conn = get_connection()
+    cur = _execute(conn,
+        _q("SELECT DISTINCT p.user_id, up.value as chat_id FROM pantry p LEFT JOIN user_preferences up ON p.user_id = up.user_id AND up.key = 'chat_id' WHERE p.expiry_date IS NOT NULL AND p.expiry_date >= ? AND p.expiry_date < ? AND p.user_id NOT IN (SELECT user_id FROM user_preferences WHERE key = 'expiry_reminder' AND value = 'off')"),
+        (start, end),
+    )
+    rows = _fetchall(cur)
+    _close(conn)
+    return [(r["user_id"], r["chat_id"]) for r in rows if r.get("chat_id")]
 
 
 def get_pantry_names(user_id):
@@ -463,5 +521,51 @@ def set_goals(user_id, daily_calories=None, daily_protein=None, daily_sodium=Non
         _q("INSERT INTO user_goals (user_id, daily_calories, daily_protein, daily_sodium) VALUES (?, ?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET daily_calories = excluded.daily_calories, daily_protein = excluded.daily_protein, daily_sodium = excluded.daily_sodium"),
         (user_id, cal, pro, sod),
     )
+    _commit(conn)
+    _close(conn)
+
+
+# --- Shopping List ---
+
+def add_to_shopping_list(user_id, name, quantity=""):
+    name = name.strip().lower()
+    conn = get_connection()
+    _execute(conn,
+        _q("INSERT INTO shopping_list (user_id, name, quantity) VALUES (?, ?, ?) ON CONFLICT(user_id, name) DO UPDATE SET quantity = excluded.quantity, checked = 0"),
+        (user_id, name, quantity),
+    )
+    _commit(conn)
+    _close(conn)
+
+
+def get_shopping_list(user_id):
+    conn = get_connection()
+    cur = _execute(conn,
+        _q("SELECT id, name, quantity, checked FROM shopping_list WHERE user_id = ? ORDER BY checked, added_date"),
+        (user_id,),
+    )
+    rows = _fetchall(cur)
+    _close(conn)
+    return rows
+
+
+def remove_from_shopping_list(user_id, name):
+    name = name.strip().lower()
+    conn = get_connection()
+    _execute(conn, _q("DELETE FROM shopping_list WHERE user_id = ? AND name = ?"), (user_id, name))
+    _commit(conn)
+    _close(conn)
+
+
+def clear_shopping_list(user_id):
+    conn = get_connection()
+    _execute(conn, _q("DELETE FROM shopping_list WHERE user_id = ?"), (user_id,))
+    _commit(conn)
+    _close(conn)
+
+
+def toggle_shopping_item(item_id):
+    conn = get_connection()
+    _execute(conn, _q("UPDATE shopping_list SET checked = 1 - checked WHERE id = ?"), (item_id,))
     _commit(conn)
     _close(conn)
