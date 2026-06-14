@@ -1229,6 +1229,22 @@ async def _handle_user_text(update, context, user_id, text):
             await msg.edit_text(sanitized, parse_mode="Markdown")
             return
 
+    # Recipe follow-up: if user is asking a question about the current recipe
+    recipe = _last_suggestion.get(user_id)
+    if recipe:
+        t_lower = text.lower().strip()
+        is_question = t_lower.endswith("?") or any(
+            kw in t_lower.split()[:3] for kw in ["what", "how", "can", "does", "is", "do", "are", "why"]
+        )
+        known_actions = {"add", "remove", "clear", "list", "show", "save", "delete",
+                         "suggest", "cook", "make", "remember", "i have", "my", "help"}
+        first_word = t_lower.split()[0] if t_lower.split() else ""
+        if is_question and first_word not in known_actions:
+            msg = await update.effective_message.reply_text("Let me answer that...")
+            answer = ai.recipe_followup(recipe, text)
+            await msg.edit_text(answer)
+            return
+
     # --- NL Processing ---
     msg = await update.effective_message.reply_text("Thinking...")
     result = ai.process_natural_language(text, pantry, recipes)
