@@ -1,0 +1,625 @@
+import json
+import base64
+import re
+import time
+from datetime import date
+from openai import OpenAI, RateLimitError
+from ddgs import DDGS
+from config import GROQ_API_KEY, GROQ_BASE_URL, GROQ_MODEL, GROQ_QUALITY_MODEL, GROQ_VISION_MODEL
+
+client = OpenAI(api_key=GROQ_API_KEY, base_url=GROQ_BASE_URL, max_retries=0)
+
+# Daily request tracking
+_daily_count = 0
+_daily_date = date.today()
+DAILY_LIMIT = 14000  # safe margin below 14,400
+WARN_AT = 13000
+
+COMMON_STAPLES = "salt, pepper, sugar, cooking oil, soy sauce, garlic, onion, ginger, eggs, rice, cooking wine, cornstarch, chilli sauce"
+
+CUISINE_SITES = {
+    "japanese": ["site:justonecookbook.com"],
+    "thai": ["site:marionskitchen.com"],
+    "fusion": ["site:marionskitchen.com"],
+    "chinese": ["site:thewoksoflife.com", "site:madewithlau.com"],
+    "singapore": ["site:themeatmen.sg"],
+    "malaysian": ["site:themeatmen.sg"],
+    "western": ["site:seriouseats.com", "site:americastestkitchen.com", "site:bonappetit.com", "site:allrecipes.com"],
+    "american": ["site:seriouseats.com", "site:americastestkitchen.com", "site:bonappetit.com", "site:allrecipes.com"],
+    "mexican": ["site:seriouseats.com", "site:americastestkitchen.com", "site:allrecipes.com"],
+    "italian": ["site:seriouseats.com", "site:allrecipes.com"],
+    "indian": [],
+    "korean": [],
+    "vietnamese": [],
+}
+
+ALL_SITES = [
+    "site:justonecookbook.com",
+    "site:marionskitchen.com",
+    "site:thewoksoflife.com",
+    "site:madewithlau.com",
+    "site:themeatmen.sg",
+    "site:seriouseats.com",
+    "site:americastestkitchen.com",
+    "site:bonappetit.com",
+    "site:allrecipes.com",
+]
+
+DETAILED_FORMAT = """Format every recipe with ALL sections below. Start with the recipe title as a bold heading with an emoji.
+
+**🍴 Recipe Title Here**
+
+**Time Overview**
+Prep: X min | Cook: X min | Total: X min | Servings: X
+
+**💡 Why It Works**
+Key techniques and science behind the recipe — extract from web references if available (e.g. Serious Eats). Explain why certain steps matter.
+
+**🥩 Ingredients**
+List each ingredient with Amount (metric) on its own line using - bullet. Do NOT add emojis next to individual ingredients.
+
+**👨‍🍳 Step-by-Step Instructions**
+Number each step. Do NOT add emojis next to individual steps or tips. Only the section heading gets an emoji.
+
+**🍽️ Serving Suggestions**
+What to serve with it. No emojis in the body text.
+
+**📦 Storage & Make-Ahead Tips**
+Fridge: X days. Freezer: X months. No emojis in body text.
+
+**📝 Recipe Notes & Swaps**
+If you don't have X, substitute with Y. No emojis in body text.
+
+**👍 Success Tips**
+Key things to get right. No emojis in body text.
+
+IMPORTANT: Only put emojis in section headings. Never add emojis to ingredient lines, step numbers, or body text."""
+
+
+def _groq_call(prompt, system_msg, model=None, temperature=0.5, max_tokens=600):
+    global _daily_count, _daily_date
+
+    # Reset counter at midnight
+    today = date.today()
+    if today != _daily_date:
+        _daily_count = 0
+        _daily_date = today
+
+    # Warn if near daily limit
+    if _daily_count >= DAILY_LIMIT:
+        raise RuntimeError("Daily Groq request limit reached (~14,000). Try again after midnight UTC, or use a different model.")
+
+    msg = [{"role": "system", "content": system_msg}, {"role": "user", "content": prompt}]
+    # Default to high-RPD model (14,400 req/day) for volume tasks.
+    # Quality tasks pass model=GROQ_QUALITY_MODEL explicitly.
+    used_model = model or "llama-3.1-8b-instant"
+
+    for attempt in range(3):
+        try:
+            resp = client.chat.completions.create(
+                model=used_model,
+                messages=msg,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            _daily_count += 1
+            text = resp.choices[0].message.content
+            # Strip  tags (model internal reasoning)
+            text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
+            return text
+
+        except RateLimitError as e:
+            # Check if it's a daily limit (remaining == 0) or per-minute
+            remaining = None
+            reset_after = None
+            try:
+                remaining = int(e.response.headers.get("x-ratelimit-remaining-requests", -1))
+                reset_after = e.response.headers.get("retry-after", None)
+            except Exception:
+                pass
+
+            if remaining == 0:
+                raise RuntimeError(
+                    "Groq daily request limit exhausted. "
+                    "Resets at midnight UTC. "
+                    "Try again tomorrow, or use `llama-3.1-8b-instant` which has 14,400 RPD."
+                )
+
+            if attempt < 2:
+                sleep_time = max(int(reset_after), 30) if reset_after else 60
+                time.sleep(sleep_time)
+                continue
+            raise
+    return None
+
+
+def search_web(query, max_results=5, sites=None):
+    try:
+        search_q = "recipe " + query
+        if sites:
+            site_filter = " OR ".join(sites)
+            search_q = f"({site_filter}) {search_q}"
+        with DDGS() as ddgs:
+            results = ddgs.text(search_q, max_results=max_results)
+            snippets = []
+            for r in results:
+                snippets.append(f"From: {r.get('href', '')}\nTitle: {r.get('title', '')}\n{r.get('body', '')}")
+            return "\n\n".join(snippets) if snippets else None
+    except Exception:
+        return None
+
+
+def detect_cuisine(query):
+    q = query.lower()
+    for cuisine, sites in CUISINE_SITES.items():
+        if cuisine in q:
+            return sites if sites else ALL_SITES
+    return ALL_SITES
+
+
+def generate_menu(pantry_items, preferences="", diversity_hint=""):
+    items_str = ", ".join(pantry_items) if pantry_items else ""
+    query = re.sub(r"(suggest|recipe|make|cook|give me|i want|can i|what can)", "", preferences or items_str, flags=re.I).strip()
+    sites = detect_cuisine(query)
+    web = search_web(query, 5, sites)
+
+    prompt = (
+        f"User request: {preferences}\n"
+        f"Pantry (just for reference, don't feel forced to use these): {items_str}\n"
+        f"Common staples (always available): {COMMON_STAPLES}\n"
+    )
+    if web:
+        prompt += f"\nWeb references:\n{web}\n"
+    prompt += (
+        f"\n{diversity_hint}\n"
+        "Suggest exactly 5 dishes based on the request and web references. "
+        "The pantry list is just FYI — you can suggest ANY dish the user might enjoy. "
+        "Feel free to ignore the pantry entirely. "
+        "Only suggest real, well-known dishes. "
+        "Return ONLY a JSON array of objects with keys: title (str), description (one line), search_query (short search for this dish). "
+        'Example: [{"title":"Chicken Katsu Curry","description":"Crispy panko chicken with Japanese curry sauce","search_query":"chicken katsu curry recipe"}]'
+    )
+
+    try:
+        text = _groq_call(prompt, "You are a chef. Return ONLY a JSON array.", temperature=0.5, max_tokens=600)
+        if not text:
+            return None
+        text = text.strip()
+        text = text.replace("```json", "").replace("```", "").strip()
+        start = text.find("[")
+        end = text.rfind("]")
+        if start >= 0 and end > start:
+            text = text[start:end+1]
+        return json.loads(text)
+    except Exception as e:
+        return None
+
+
+def elaborate_recipe(search_query, pantry_items=None, preferences=""):
+    sites = detect_cuisine(search_query + " " + preferences)
+    web = search_web(search_query, 5, sites)
+    equip = preferences if "equipment" in preferences.lower() else ""
+
+    prompt = (
+        f"Dish: {search_query}\n"
+        f"Equipment: {equip}\n"
+        f"Pantry (just for reference, don't feel forced to use these): {', '.join(pantry_items) if pantry_items else ''}\n"
+        f"Common staples (always available): {COMMON_STAPLES}\n"
+    )
+    if web:
+        prompt += f"\nReference recipes from the web:\n{web}\n"
+    prompt += (
+        f"\nWrite a FULL detailed recipe for this dish following this format:\n{DETAILED_FORMAT}\n\n"
+        "Use metric measurements. Include estimated protein(g), calories, and sodium(mg). "
+        "Make it comprehensive but practical. Use emojis appropriately.\n"
+        "The pantry list is just FYI — you can suggest ANY ingredients needed for the dish. "
+        "You can optionally incorporate up to about 50% of pantry items if they fit, but don't force it. "
+        "IMPORTANT: Start with the dish name as a bold heading with an emoji, like: **Dish Name Here**."
+    )
+
+    try:
+        result = _groq_call(prompt, "You are a professional recipe writer. Write detailed, practical recipes.", model=GROQ_QUALITY_MODEL, temperature=0.5, max_tokens=2500)
+        return result or f"AI error: No response"
+    except Exception as e:
+        return f"AI error: {e}"
+
+
+# Keep for backward compat — used by /canbake for strict pantry-only suggestion
+def suggest_recipe(user_id, pantry_items, preferences=""):
+    items_str = ", ".join(pantry_items) if pantry_items else "nothing specific"
+    search_query = re.sub(r"(suggest|recipe|make|cook|give me|i want|can i)", "", preferences, flags=re.I).strip()
+    web = search_web(search_query or items_str, 3, ALL_SITES)
+
+    prompt = (
+        f"Pantry has: {items_str}.\nCommon staples: {COMMON_STAPLES}.\n"
+        f"User request: {preferences}\n"
+    )
+    if web:
+        prompt += f"\nWeb references:\n{web}\n"
+    prompt += (
+        "\nSuggest 1-3 realistic dishes. Use the standard format with metric measurements. "
+        "Include protein (g), calories, sodium (mg). Mark [BUY] for needed ingredients."
+    )
+
+    try:
+        return _groq_call(prompt, "You are a chef assistant. Suggest only real, well-known dishes.", temperature=0.5, max_tokens=1200) or f"AI error"
+    except Exception as e:
+        return f"AI error: {e}"
+
+
+def parse_recipe_text(text):
+    lines = [l.strip() for l in text.strip().split("\n") if l.strip()]
+    if not lines:
+        return None
+    title = lines[0].replace("**", "").replace("*", "")
+    desc = ""
+    ingredients = []
+    instructions = []
+    nutrition = {}
+    mode = None
+    for line in lines[1:]:
+        clean = line.replace("**", "").replace("*", "")
+        low = clean.lower()
+        if "ingredient" in low:
+            mode = "ingredients"
+            continue
+        elif "instruction" in low or "step" in low:
+            mode = "instructions"
+            continue
+        elif "protein" in low and "calorie" in low:
+            mode = "nutrition"
+            continue
+        elif "why it works" in low or "time overview" in low or "serving" in low or "storage" in low or "notes" in low or "tips" in low:
+            mode = None
+            continue
+        elif mode is None and len(clean) > 20:
+            if not desc:
+                desc = clean
+            continue
+        if mode == "ingredients":
+            ing = clean.lstrip("•-*0123456789. ").strip()
+            if ing:
+                ingredients.append(ing)
+        elif mode == "instructions":
+            step = clean.lstrip("0123456789. ").strip()
+            if step:
+                instructions.append(step)
+        elif mode == "nutrition":
+            if ":" in clean:
+                k, v = clean.split(":", 1)
+                nutrition[k.strip().lower()] = v.strip()
+    protein = calories = sodium = 0
+    for k, v in nutrition.items():
+        nums = [int(s) for s in v.split() if s.isdigit()]
+        if nums:
+            if "protein" in k:
+                protein = nums[0]
+            elif "calorie" in k:
+                calories = nums[0]
+            elif "sodium" in k:
+                sodium = nums[0]
+    return {"title": title, "description": desc, "ingredients": ingredients,
+            "instructions": instructions, "protein_g": protein, "calories": calories, "sodium_mg": sodium}
+
+
+def generate_recipe_by_name(recipe_name, preferences=""):
+    web = search_web(recipe_name, 3, ALL_SITES)
+    prompt = f"Create a detailed recipe for: {recipe_name}.\n{preferences}\n"
+    if web:
+        prompt += f"\nWeb references:\n{web}\n"
+    prompt += f"\nFormat:\n{DETAILED_FORMAT}"
+    try:
+        return _groq_call(prompt, "You are a professional recipe writer.", model=GROQ_QUALITY_MODEL, temperature=0.5, max_tokens=2500)
+    except Exception:
+        return None
+
+
+def nutrition_info(food_name):
+    prompt = (
+        f"Provide the nutritional breakdown for {food_name} (per 100g). "
+        "Return ONLY valid JSON with keys: calories, protein_g, carbs_g, fat_g, sodium_mg. "
+        'Example: {"calories": 250, "protein_g": 20, "carbs_g": 5, "fat_g": 15, "sodium_mg": 400}'
+    )
+    try:
+        text = _groq_call(prompt, "You are a nutritionist. Respond only with JSON.", temperature=0.3, max_tokens=300)
+        if not text:
+            return {"calories": 0, "protein_g": 0, "carbs_g": 0, "fat_g": 0, "sodium_mg": 0}
+        text = text.strip()
+        text = text.replace("```json", "").replace("```", "").strip()
+        start, end = text.find("{"), text.rfind("}")
+        if start >= 0 and end > start:
+            text = text[start:end+1]
+        return json.loads(text)
+    except Exception:
+        return {"calories": 0, "protein_g": 0, "carbs_g": 0, "fat_g": 0, "sodium_mg": 0}
+
+
+def estimate_meal_calories(meal_description):
+    prompt = (
+        f"Estimate nutritional content: \"{meal_description}\". "
+        "Return ONLY JSON with keys: calories, protein_g, sodium_mg. "
+        'Example: {"calories": 650, "protein_g": 35, "sodium_mg": 800}'
+    )
+    try:
+        text = _groq_call(prompt, "You are a nutritionist. Respond only with JSON.", temperature=0.3, max_tokens=200)
+        if not text:
+            return {"calories": 0, "protein_g": 0, "sodium_mg": 0}
+        text = text.strip()
+        text = text.replace("```json", "").replace("```", "").strip()
+        start, end = text.find("{"), text.rfind("}")
+        if start >= 0 and end > start:
+            text = text[start:end+1]
+        return json.loads(text)
+    except Exception:
+        return {"calories": 0, "protein_g": 0, "sodium_mg": 0}
+
+
+def process_natural_language(user_message, pantry_items=None, recipes=None):
+    pantry_str = ", ".join(pantry_items) if pantry_items else "empty"
+
+    prompt = (
+        f"Pantry: {pantry_str}\n"
+        f'Message: "{user_message}"\n\n'
+        "Respond with ONLY JSON. No markdown.\n"
+        '{"action":"add"|"remove"|"clear_pantry"|"list_pantry"|"expiring"|"suggest"|"elaborate"|"canbake"|"list_recipes"|"view_recipe"|"delete_recipe"|"save_recipe"|"set_preference"|"help"|"chat",'
+        '"items":["item1","item2"],'
+        '"message":"short reply"}\n\n'
+        'Use "elaborate" when user picks a dish: "dish 1", "first one", "the chicken one", "tell me more"\n'
+        'Examples:\n'
+        '{"action":"add","items":["chicken","rice"],"message":"Added!"}\n'
+        '{"action":"suggest","items":[],"message":"Here are some ideas..."}\n'
+        '{"action":"elaborate","items":["chicken katsu"],"message":"Let me elaborate..."}'
+    )
+    try:
+        text = _groq_call(prompt, "You are a kitchen assistant. Reply only in JSON.", temperature=0.1, max_tokens=200)
+        if not text:
+            return {"action": "chat", "items": [], "message": "Sorry, I couldn't process that. Try again."}
+        text = text.strip()
+        text = text.replace("```json", "").replace("```", "").strip()
+        start, end = text.find("{"), text.rfind("}")
+        if start >= 0 and end > start:
+            text = text[start:end+1]
+        result = json.loads(text)
+        if not isinstance(result.get("items"), list):
+            result["items"] = []
+        return result
+    except Exception:
+        msg = user_message.lower()
+        if any(w in msg for w in ["add", "put", "store", "have"]):
+            return {"action": "add", "items": [], "message": "What items? Try: add chicken and rice"}
+        if any(w in msg for w in ["remove", "delete", "clear", "reset"]):
+            return {"action": "remove", "items": [], "message": "What to remove? Try: remove milk"}
+        if any(w in msg for w in ["pantry", "what do i have", "list"]):
+            return {"action": "list_pantry", "items": [], "message": ""}
+        if any(w in msg for w in ["dish", "first", "second", "third", "tell me more", "elaborate", "the "])\
+                and any(w in msg for w in ["1", "2", "3", "one", "two", "three", "first", "second", "third"]):
+            return {"action": "elaborate", "items": msg.split(), "message": ""}
+        if any(w in msg for w in ["recipe", "cook", "make", "suggest", "eat"]):
+            return {"action": "suggest", "items": [], "message": ""}
+        if any(w in msg for w in ["calorie", "calories", "log", "meal", "ate"]):
+            return {"action": "calories", "items": [], "message": ""}
+        if any(w in msg for w in ["remember", "i have a", "i have an", "my kitchen", "my equipment"]):
+            return {"action": "set_preference", "items": ["equipment", user_message], "message": "Saved!"}
+        if any(w in msg for w in ["create", "add", "new", "save"]) and "recipe" in msg:
+            return {"action": "save_recipe", "items": msg.split(), "message": ""}
+        if any(w in msg for w in ["delete", "remove", "forget"]) and any(w in msg for w in ["recipe", "saved"]):
+            return {"action": "delete_recipe", "items": msg.split(), "message": ""}
+        if any(w in msg for w in ["show", "view", "expand", "open"]) and any(w in msg for w in ["recipe", "list"]):
+            return {"action": "list_recipes", "items": [], "message": ""}
+        if any(w in msg for w in ["show", "view", "expand", "open", "read"]) and not any(w in msg for w in ["pantry", "list"]):
+            return {"action": "view_recipe", "items": msg.split(), "message": ""}
+        if any(w in msg for w in ["help", "what can you"]):
+            return {"action": "help", "items": [], "message": ""}
+        return {"action": "chat", "items": [], "message": "Hi! Try: add chicken to pantry or suggest a recipe"}
+
+
+def recognize_food_from_image(base64_image):
+    for model_id in [GROQ_VISION_MODEL, "meta-llama/llama-3.2-11b-vision-instruct",
+                     "llama-3.2-90b-vision-preview"]:
+        try:
+            resp = client.chat.completions.create(
+                model=model_id,
+                messages=[{"role": "user", "content": [
+                    {"type": "text", "text": (
+                        "Identify this food. Return ONLY JSON with keys: name, description, "
+                        "calories_per_100g, protein_g_per_100g, carbs_g_per_100g, "
+                        "fat_g_per_100g, sodium_mg_per_100g."
+                    )},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}},
+                ]}],
+                temperature=0.3, max_tokens=500,
+            )
+            text = resp.choices[0].message.content.strip()
+            text = text.replace("```json", "").replace("```", "").strip()
+            start, end = text.find("{"), text.rfind("}")
+            if start >= 0 and end > start:
+                text = text[start:end+1]
+            return json.loads(text)
+        except Exception:
+            continue
+    return {"error": "Could not identify food", "name": "Unknown", "description": "",
+            "calories_per_100g": 0, "protein_g_per_100g": 0,
+            "carbs_g_per_100g": 0, "fat_g_per_100g": 0, "sodium_mg_per_100g": 0}
+
+
+def recipe_followup(recipe_text, user_question):
+    prompt = (
+        f"Here is the current recipe:\n{recipe_text}\n\n"
+        f"The user asks: {user_question}\n\n"
+        "Answer the user's question based on this recipe. Be helpful and specific. "
+        "Reference the recipe details in your answer. Keep it concise."
+    )
+    try:
+        return _groq_call(prompt, "You are a helpful chef assistant. Answer questions about the current recipe.", temperature=0.5, max_tokens=600) or f"AI error"
+    except Exception as e:
+        return f"AI error: {e}"
+
+
+def generate_shopping_list(recipe_title, missing_ingredients):
+    prompt = (
+        f"Shopping list for '{recipe_title}'. Missing: {', '.join(missing_ingredients)}. "
+        "Suggest quantities in metric units and estimated prices in SGD. Return as bullet list."
+    )
+    try:
+        return _groq_call(prompt, "You are a helpful shopping assistant.", temperature=0.5, max_tokens=400) or f"AI error"
+    except Exception as e:
+        return f"AI error: {e}"
+
+
+# --- Substitution ---
+
+def substitute_ingredient(recipe_text, substitution_text):
+    prompt = (
+        f"Here is the current recipe:\n{recipe_text}\n\n"
+        f"The user wants to make this substitution: {substitution_text}\n\n"
+        "Return the FULL updated recipe with the substitution applied. "
+        "Adjust quantities, cooking times, and techniques where needed. "
+        "Add a note explaining the key changes. "
+        "Keep the same format as the original recipe with all sections."
+    )
+    try:
+        return _groq_call(prompt, "You are a professional recipe writer. Modify the recipe with the requested substitution.", model=GROQ_QUALITY_MODEL, temperature=0.5, max_tokens=2500) or f"AI error"
+    except Exception as e:
+        return f"AI error: {e}"
+
+
+# --- Scale ---
+
+def scale_recipe(recipe_text, factor, target_servings=None):
+    prompt = (
+        f"Here is the current recipe:\n{recipe_text}\n\n"
+        f"Scale this recipe by a factor of {factor}."
+        + (f" Target: {target_servings} servings." if target_servings else "")
+        + "\n\nReturn the FULL updated recipe with ALL ingredient quantities rescaled. "
+        "Adjust cook times and equipment sizes if needed. "
+        "Keep the same format with all sections."
+    )
+    try:
+        return _groq_call(prompt, "You are a professional recipe writer. Scale the recipe accurately.", model=GROQ_QUALITY_MODEL, temperature=0.5, max_tokens=2500) or f"AI error"
+    except Exception as e:
+        return f"AI error: {e}"
+
+
+# --- Voice Transcription ---
+
+def transcribe_audio(audio_bytes, filename="audio.ogg"):
+    try:
+        import tempfile, os
+        fd, path = tempfile.mkstemp(suffix=".ogg")
+        os.write(fd, audio_bytes)
+        os.close(fd)
+        with open(path, "rb") as f:
+            transcript = client.audio.transcriptions.create(
+                model="whisper-large-v3",
+                file=(filename, f, "audio/ogg"),
+            )
+        os.unlink(path)
+        return transcript.text
+    except Exception as e:
+        return None
+
+
+# --- Batch Cooking ---
+
+def generate_batch_menu(count, cuisine, pantry_items, preferences="", diversity_hint=""):
+    items_str = ", ".join(pantry_items) if pantry_items else ""
+    sites = detect_cuisine(cuisine)
+    web = search_web(cuisine + " recipes", 5, sites)
+    prompt = (
+        f"Cuisine: {cuisine}\n"
+        f"Pantry (just for reference, don't feel forced to use these): {items_str}\n"
+        f"User request: {preferences}\n"
+    )
+    if web:
+        prompt += f"\nWeb references:\n{web}\n"
+    prompt += (
+        f"\n{diversity_hint}\n"
+        f"Suggest exactly {count} dishes for a {cuisine} meal. "
+        "The dishes should be well-balanced with variety in flavors, textures, and cooking methods. "
+        "Include a good mix of proteins, vegetables, carbs, and optionally dessert. "
+        "Only suggest real, well-known dishes. "
+        "Return ONLY a JSON array of objects with keys: title (str), description (one line), search_query (short search for this dish). "
+        'Example: [{"title":"Chicken Katsu Curry","description":"Crispy panko chicken with Japanese curry sauce","search_query":"chicken katsu curry recipe"}]'
+    )
+    try:
+        text = _groq_call(prompt, "You are a chef. Return ONLY a JSON array.", temperature=0.5, max_tokens=800)
+        if not text:
+            return None
+        text = text.strip()
+        text = text.replace("```json", "").replace("```", "").strip()
+        start = text.find("[")
+        end = text.rfind("]")
+        if start >= 0 and end > start:
+            text = text[start:end+1]
+        return json.loads(text)
+    except Exception:
+        return None
+
+
+def plan_batch(dish_titles, cuisine):
+    dishes_str = "\n".join(f"- {d}" for d in dish_titles)
+    prompt = (
+        f"Create a consolidated cooking plan for a {cuisine} meal with these dishes:\n{dishes_str}\n\n"
+        "Return a comprehensive plan with:\n"
+        "1. A FULL detailed recipe for EACH dish (ingredients with metric amounts, step-by-step instructions, cook times)\n"
+        "2. A combined ingredients list (grouped by category, merged quantities to avoid duplicates)\n"
+        "3. A cooking timeline/timetable so everything finishes at the same time. "
+        "   Show what to prep and cook at each minute mark (e.g., T-60min: x, T-30min: y, etc.).\n"
+        "   Dessert can be prepared separately if included.\n"
+        "4. Serving order and plating tips\n"
+        "IMPORTANT FORMATTING RULES:\n"
+        "- Number each dish as 1. Dish Name, 2. Dish Name, etc. Do NOT use ### or # headings.\n"
+        "- Use **bold** for section headings like Ingredients, Instructions, Timeline.\n"
+        "- Use emojis on section headers only.\n"
+        "- Use metric measurements."
+    )
+    try:
+        return _groq_call(prompt, "You are a professional chef specialized in meal planning and timing.", model=GROQ_QUALITY_MODEL, temperature=0.5, max_tokens=4000) or f"AI error"
+    except Exception as e:
+        return f"AI error: {e}"
+
+
+# --- Cooking Mode ---
+
+def parse_cook_recipe(recipe_text):
+    """Extract title, ingredients block, and step list from a formatted recipe."""
+    lines = recipe_text.split("\n")
+    title = ""
+    ingredients = []
+    steps = []
+    mode = None
+
+    for line in lines:
+        clean = line.strip()
+        lower = clean.lower()
+
+        if not title and clean and not clean.startswith("**") and not clean.startswith("*"):
+            candidate = clean.replace("**", "").replace("*", "").strip()
+            if candidate and len(candidate) < 100:
+                title = candidate
+
+        if "ingredient" in lower and (clean.startswith("**") or clean.startswith("*")):
+            mode = "ingredients"
+            continue
+        if ("instruction" in lower or "step" in lower) and (clean.startswith("**") or clean.startswith("*")):
+            mode = "instructions"
+            continue
+        if "time overview" in lower or "serving suggestion" in lower or "storage" in lower or "recipe notes" in lower or "success tips" in lower:
+            mode = None
+            continue
+
+        if mode == "ingredients":
+            if clean and not clean.startswith("**") and not clean.startswith("*"):
+                ingredients.append(clean)
+        elif mode == "instructions":
+            step_match = re.match(r"\s*(\d+)[.)]\s*(.*)", clean)
+            if step_match:
+                step_text = step_match.group(2).replace("**", "").replace("*", "").strip()
+                if step_text:
+                    steps.append(step_text)
+
+    return {
+        "title": title or "Recipe",
+        "ingredients": ingredients,
+        "steps": steps,
+    }
