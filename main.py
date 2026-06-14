@@ -16,11 +16,17 @@ from bot import create_app
 
 
 class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
+    def _respond(self):
         self.send_response(200)
         self.send_header("Content-Type", "text/plain")
         self.end_headers()
+
+    def do_GET(self):
+        self._respond()
         self.wfile.write(b"OK")
+
+    def do_HEAD(self):
+        self._respond()
 
     def log_message(self, format, *args):
         pass
