@@ -187,14 +187,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         '  "log chicken rice for lunch"\n'
         '  "how many calories today?"\n'
         '  "save recipe for braised pork rice"\n\n'
-        "\u2500\u2500\u2500 Pantry \u2500\u2500\u2500\n\n"
+        "*Pantry*\n\n"
         "  /add chicken, rice, 15/07/25     add items (with optional expiry)\n"
         "  /remove milk                     remove an item\n"
         "  /pantry                          show your pantry\n"
         "  /expiring [days]                 items expiring soon\n"
         "  /recategorize                    fix item categories\n"
         "  /expiryremind on/off             toggle monthly expiry reminders\n\n"
-        "\u2500\u2500\u2500 Recipes & Cooking \u2500\u2500\u2500\n\n"
+        "*Recipes & Cooking*\n\n"
         "  /suggest [preference]            AI recipe suggestions\n"
         "  /canbake                         cook with only what you have\n"
         "  /save <name>                     save a new recipe\n"
@@ -204,25 +204,25 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "  /export <name>                   export as a file\n"
         "  /batch [count]                   plan a multi-dish meal\n"
         "  /cookmode                        step-by-step cooking mode\n\n"
-        "\u2500\u2500\u2500 Shopping List \u2500\u2500\u2500\n\n"
+        "*Shopping List*\n\n"
         "  /shopping <recipe>               auto-add missing ingredients\n"
         "  /shop milk, eggs                 add items to your list\n"
         "  /list                            view & check off items\n"
         "  /shopremove milk                 remove an item\n"
         "  /shopclear                       clear the entire list\n\n"
-        "\u2500\u2500\u2500 Nutrition & Tracking \u2500\u2500\u2500\n\n"
+        "*Nutrition & Tracking*\n\n"
         "  /log chicken rice, lunch         log a meal\n"
         "  /calories                        today's nutrition totals\n"
         "  /nutrition chicken               lookup per 100g\n"
         "  /goal 1900 120 2300              set daily targets\n"
         "  /weekly                          weekly summary\n\n"
-        "\u2500\u2500\u2500 Settings \u2500\u2500\u2500\n\n"
+        "*Settings*\n\n"
         "  /equipment air fryer, oven       save your kitchen gear\n"
         "  /diet keto                       set a diet profile\n"
         "  /diet all                        reset to normal\n\n"
         "You can also send voice messages and photos!"
     )
-    await update.message.reply_text(text)
+    await update.message.reply_text(text, parse_mode="Markdown")
 
 
 # --- Pantry ---
