@@ -2,6 +2,8 @@
 import sys
 import os
 import asyncio
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 sys.path.insert(0, os.path.dirname(__file__))
 
 # Fix for Windows event loop with httpx
@@ -13,6 +15,23 @@ from database import init_db
 from bot import create_app
 
 
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+    def log_message(self, format, *args):
+        pass
+
+
+def run_health_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    server.serve_forever()
+
+
 def main():
     if not TELEGRAM_BOT_TOKEN:
         print("ERROR: TELEGRAM_BOT_TOKEN not set. Create a .env file or set the env variable.")
@@ -21,6 +40,9 @@ def main():
         print("ERROR: GROQ_API_KEY not set. Update .env with your Groq API key.")
         print("Get one free at: https://console.groq.com")
         sys.exit(1)
+
+    health_thread = threading.Thread(target=run_health_server, daemon=True)
+    health_thread.start()
 
     init_db()
     print("Database initialized")
