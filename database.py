@@ -39,21 +39,34 @@ def _q(query):
     return query
 
 
-def _row_to_dict(row, conn=None):
+def _execute(conn, query, params=None):
+    """Execute query on either SQLite or PostgreSQL. Returns cursor-like object."""
     if USE_PG:
-        import psycopg2.extras
-        if row is None:
-            return None
-        return dict(row)
+        cur = conn.cursor()
+        cur.execute(query, params or ())
+        return cur
+    return conn.execute(query, params or ())
+
+
+def _fetchone(cur):
+    """Fetch one row as dict regardless of backend."""
+    row = cur.fetchone()
     if row is None:
         return None
+    if USE_PG:
+        cols = [desc[0] for desc in cur.description]
+        return dict(zip(cols, row))
     return dict(row)
 
 
-def _rows_to_dicts(rows, conn=None):
-    import psycopg2.extras
-    if rows is None:
+def _fetchall(cur):
+    """Fetch all rows as list of dicts regardless of backend."""
+    rows = cur.fetchall()
+    if not rows:
         return []
+    if USE_PG:
+        cols = [desc[0] for desc in cur.description]
+        return [dict(zip(cols, r)) for r in rows]
     return [dict(r) for r in rows]
 
 
@@ -116,7 +129,7 @@ def _init_sqlite():
         );
     """)
     try:
-        conn.execute("ALTER TABLE recipes ADD COLUMN full_text TEXT DEFAULT ''")
+        _execute(conn, "ALTER TABLE recipes ADD COLUMN full_text TEXT DEFAULT ''")
     except Exception:
         pass
     _commit(conn)
@@ -241,7 +254,7 @@ def add_pantry_item(user_id, name, quantity="1", unit="", expiry="", category=No
     if category is None:
         category = categorize_item(name)
     conn = get_connection()
-    conn.execute(
+    _execute(conn, 
         _q("INSERT INTO pantry (user_id, name, quantity, unit, expiry_date, category) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(user_id, name) DO UPDATE SET quantity = excluded.quantity, unit = excluded.unit, expiry_date = COALESCE(excluded.expiry_date, pantry.expiry_date), category = COALESCE(excluded.category, pantry.category)"),
         (user_id, name, quantity, unit, expiry if expiry else None, category),
     )
@@ -251,7 +264,7 @@ def add_pantry_item(user_id, name, quantity="1", unit="", expiry="", category=No
 
 def remove_pantry_item(user_id, name):
     conn = get_connection()
-    conn.execute(_q("DELETE FROM pantry WHERE user_id = ? AND name = ?"),
+    _execute(conn, _q("DELETE FROM pantry WHERE user_id = ? AND name = ?"),
                  (user_id, name.strip().lower()))
     _commit(conn)
     _close(conn)
@@ -259,8 +272,8 @@ def remove_pantry_item(user_id, name):
 
 def get_pantry(user_id):
     conn = get_connection()
-    cur = conn.execute(_q("SELECT name, quantity, unit, expiry_date, category FROM pantry WHERE user_id = ? ORDER BY category, name"), (user_id,))
-    rows = _rows_to_dicts(cur.fetchall(), conn)
+    cur = _execute(conn, _q("SELECT name, quantity, unit, expiry_date, category FROM pantry WHERE user_id = ? ORDER BY category, name"), (user_id,))
+    rows = _fetchall(cur)
     _close(conn)
     return rows
 
@@ -276,12 +289,12 @@ def get_pantry_grouped(user_id):
 
 def recategorize_pantry(user_id):
     conn = get_connection()
-    cur = conn.execute(_q("SELECT id, name FROM pantry WHERE user_id = ?"), (user_id,))
-    rows = _rows_to_dicts(cur.fetchall(), conn)
+    cur = _execute(conn, _q("SELECT id, name FROM pantry WHERE user_id = ?"), (user_id,))
+    rows = _fetchall(cur)
     for row in rows:
         cat = categorize_item(row["name"])
         if cat:
-            conn.execute(_q("UPDATE pantry SET category = ? WHERE id = ?"), (cat, row["id"]))
+            _execute(conn, _q("UPDATE pantry SET category = ? WHERE id = ?"), (cat, row["id"]))
     _commit(conn)
     _close(conn)
 
@@ -289,15 +302,15 @@ def recategorize_pantry(user_id):
 def get_expiring_items(user_id, days=3):
     cutoff = (date.today() + timedelta(days=days)).isoformat()
     conn = get_connection()
-    cur = conn.execute(_q("SELECT name, quantity, unit, expiry_date FROM pantry WHERE user_id = ? AND expiry_date IS NOT NULL AND expiry_date <= ? ORDER BY expiry_date"), (user_id, cutoff))
-    rows = _rows_to_dicts(cur.fetchall(), conn)
+    cur = _execute(conn, _q("SELECT name, quantity, unit, expiry_date FROM pantry WHERE user_id = ? AND expiry_date IS NOT NULL AND expiry_date <= ? ORDER BY expiry_date"), (user_id, cutoff))
+    rows = _fetchall(cur)
     _close(conn)
     return rows
 
 
 def get_pantry_names(user_id):
     conn = get_connection()
-    cur = conn.execute(_q("SELECT name FROM pantry WHERE user_id = ? ORDER BY name"), (user_id,))
+    cur = _execute(conn, _q("SELECT name FROM pantry WHERE user_id = ? ORDER BY name"), (user_id,))
     rows = cur.fetchall()
     _close(conn)
     return [r["name"] if not USE_PG else r[0] for r in rows]
@@ -308,7 +321,7 @@ def get_pantry_names(user_id):
 def save_recipe(user_id, title, description, ingredients, instructions,
                 full_text="", cuisine="", protein_g=0, calories=0, sodium_mg=0):
     conn = get_connection()
-    conn.execute(
+    _execute(conn, 
         _q("INSERT INTO recipes (user_id, title, description, ingredients, instructions, full_text, cuisine, protein_g, calories, sodium_mg) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"),
         (user_id, title, description,
          json.dumps(ingredients), json.dumps(instructions),
@@ -320,16 +333,15 @@ def save_recipe(user_id, title, description, ingredients, instructions,
 
 def get_recipes(user_id):
     conn = get_connection()
-    cur = conn.execute(_q("SELECT id, title, description, cuisine, protein_g, calories, saved_date FROM recipes WHERE user_id = ? ORDER BY saved_date DESC"), (user_id,))
-    rows = _rows_to_dicts(cur.fetchall(), conn)
+    cur = _execute(conn, _q("SELECT id, title, description, cuisine, protein_g, calories, saved_date FROM recipes WHERE user_id = ? ORDER BY saved_date DESC"), (user_id,))
+    rows = _fetchall(cur)
     _close(conn)
     return rows
 
 
-def _recipe_row_to_dict(row):
-    if not row:
+def _recipe_row_to_dict(d):
+    if not d:
         return None
-    d = dict(row)
     d["ingredients"] = json.loads(d["ingredients"])
     d["instructions"] = json.loads(d["instructions"])
     return d
@@ -337,26 +349,23 @@ def _recipe_row_to_dict(row):
 
 def get_recipe(user_id, recipe_id):
     conn = get_connection()
-    cur = conn.execute(_q("SELECT * FROM recipes WHERE user_id = ? AND id = ?"), (user_id, recipe_id))
-    row = cur.fetchone()
+    cur = _execute(conn, _q("SELECT * FROM recipes WHERE user_id = ? AND id = ?"), (user_id, recipe_id))
+    row = _fetchone(cur)
     _close(conn)
     return _recipe_row_to_dict(row)
 
 
 def get_recipe_by_title(user_id, title):
     conn = get_connection()
-    if USE_PG:
-        cur = conn.execute(_q("SELECT * FROM recipes WHERE user_id = ? AND LOWER(title) = LOWER(?)"), (user_id, title.strip()))
-    else:
-        cur = conn.execute(_q("SELECT * FROM recipes WHERE user_id = ? AND LOWER(title) = LOWER(?)"), (user_id, title.strip()))
-    row = cur.fetchone()
+    cur = _execute(conn, _q("SELECT * FROM recipes WHERE user_id = ? AND LOWER(title) = LOWER(?)"), (user_id, title.strip()))
+    row = _fetchone(cur)
     _close(conn)
     return _recipe_row_to_dict(row)
 
 
 def delete_recipe(user_id, recipe_id):
     conn = get_connection()
-    conn.execute(_q("DELETE FROM recipes WHERE user_id = ? AND id = ?"),
+    _execute(conn, _q("DELETE FROM recipes WHERE user_id = ? AND id = ?"),
                  (user_id, recipe_id))
     _commit(conn)
     _close(conn)
@@ -366,7 +375,7 @@ def delete_recipe(user_id, recipe_id):
 
 def log_meal(user_id, meal_name, calories=0, protein_g=0, sodium_mg=0, meal_type=""):
     conn = get_connection()
-    conn.execute(
+    _execute(conn, 
         _q("INSERT INTO meal_logs (user_id, meal_name, calories, protein_g, sodium_mg, meal_type) VALUES (?, ?, ?, ?, ?, ?)"),
         (user_id, meal_name, calories, protein_g, sodium_mg, meal_type),
     )
@@ -377,11 +386,11 @@ def log_meal(user_id, meal_name, calories=0, protein_g=0, sodium_mg=0, meal_type
 def get_today_logs(user_id):
     today = date.today().isoformat()
     conn = get_connection()
-    cur = conn.execute(
+    cur = _execute(conn, 
         _q("SELECT meal_name, calories, protein_g, sodium_mg, meal_type FROM meal_logs WHERE user_id = ? AND logged_date = ? ORDER BY id"),
         (user_id, today),
     )
-    rows = _rows_to_dicts(cur.fetchall(), conn)
+    rows = _fetchall(cur)
     _close(conn)
     return rows
 
@@ -389,11 +398,11 @@ def get_today_logs(user_id):
 def get_weekly_logs(user_id):
     week_ago = (date.today() - timedelta(days=7)).isoformat()
     conn = get_connection()
-    cur = conn.execute(
+    cur = _execute(conn, 
         _q("SELECT logged_date, SUM(calories) as total_cal, SUM(protein_g) as total_protein, SUM(sodium_mg) as total_sodium FROM meal_logs WHERE user_id = ? AND logged_date >= ? GROUP BY logged_date ORDER BY logged_date"),
         (user_id, week_ago),
     )
-    rows = _rows_to_dicts(cur.fetchall(), conn)
+    rows = _fetchall(cur)
     _close(conn)
     return rows
 
@@ -402,7 +411,7 @@ def get_weekly_logs(user_id):
 
 def get_user_preference(user_id, key):
     conn = get_connection()
-    cur = conn.execute(_q("SELECT value FROM user_preferences WHERE user_id = ? AND key = ?"), (user_id, key))
+    cur = _execute(conn, _q("SELECT value FROM user_preferences WHERE user_id = ? AND key = ?"), (user_id, key))
     row = cur.fetchone()
     _close(conn)
     if row:
@@ -412,7 +421,7 @@ def get_user_preference(user_id, key):
 
 def set_user_preference(user_id, key, value):
     conn = get_connection()
-    conn.execute(
+    _execute(conn, 
         _q("INSERT INTO user_preferences (user_id, key, value) VALUES (?, ?, ?) ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value"),
         (user_id, key, value.strip()),
     )
@@ -422,7 +431,7 @@ def set_user_preference(user_id, key, value):
 
 def get_all_preferences(user_id):
     conn = get_connection()
-    cur = conn.execute(_q("SELECT key, value FROM user_preferences WHERE user_id = ?"), (user_id,))
+    cur = _execute(conn, _q("SELECT key, value FROM user_preferences WHERE user_id = ?"), (user_id,))
     rows = cur.fetchall()
     _close(conn)
     if USE_PG:
@@ -434,7 +443,7 @@ def get_all_preferences(user_id):
 
 def get_goals(user_id):
     conn = get_connection()
-    cur = conn.execute(_q("SELECT daily_calories, daily_protein, daily_sodium FROM user_goals WHERE user_id = ?"), (user_id,))
+    cur = _execute(conn, _q("SELECT daily_calories, daily_protein, daily_sodium FROM user_goals WHERE user_id = ?"), (user_id,))
     row = cur.fetchone()
     _close(conn)
     if row:
@@ -450,7 +459,7 @@ def set_goals(user_id, daily_calories=None, daily_protein=None, daily_sodium=Non
     pro = daily_protein if daily_protein is not None else current["daily_protein"]
     sod = daily_sodium if daily_sodium is not None else current["daily_sodium"]
     conn = get_connection()
-    conn.execute(
+    _execute(conn, 
         _q("INSERT INTO user_goals (user_id, daily_calories, daily_protein, daily_sodium) VALUES (?, ?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET daily_calories = excluded.daily_calories, daily_protein = excluded.daily_protein, daily_sodium = excluded.daily_sodium"),
         (user_id, cal, pro, sod),
     )

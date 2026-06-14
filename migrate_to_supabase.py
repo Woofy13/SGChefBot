@@ -114,7 +114,7 @@ for r in rows:
             "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
             "ON CONFLICT DO NOTHING",
             (r["user_id"], r["title"], r["description"], r["ingredients"], r["instructions"],
-             r.get("full_text", ""), r["cuisine"], r["protein_g"], r["calories"], r["sodium_mg"], r["saved_date"])
+             r["full_text"] if "full_text" in r else "", r["cuisine"], r["protein_g"], r["calories"], r["sodium_mg"], r["saved_date"])
         )
         count += 1
     except Exception as e:
