@@ -215,9 +215,14 @@ def _init_pg():
             name TEXT NOT NULL,
             quantity TEXT DEFAULT '',
             added_date TEXT DEFAULT (CURRENT_DATE),
-            checked INTEGER DEFAULT 0
+            checked INTEGER DEFAULT 0,
+            UNIQUE(user_id, name)
         );
     """)
+    try:
+        cur.execute("ALTER TABLE shopping_list ADD UNIQUE (user_id, name)")
+    except Exception:
+        pass
     _commit(conn)
     _close(conn)
 
