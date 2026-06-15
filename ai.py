@@ -2,18 +2,40 @@ import json
 import base64
 import re
 import time
+import logging
 from datetime import date
 from openai import OpenAI, RateLimitError
 from ddgs import DDGS
-from config import GROQ_API_KEY, GROQ_BASE_URL, GROQ_MODEL, GROQ_QUALITY_MODEL, GROQ_VISION_MODEL
+from config import GROQ_API_KEY, GROQ_BASE_URL, GROQ_MODEL, GROQ_QUALITY_MODEL, GROQ_VISION_MODEL, OWNER_TELEGRAM_ID
 
 client = OpenAI(api_key=GROQ_API_KEY, base_url=GROQ_BASE_URL, max_retries=0)
 
-# Daily request tracking
+logger = logging.getLogger(__name__)
+
+# Global daily request tracking
 _daily_count = 0
 _daily_date = date.today()
 DAILY_LIMIT = 14000  # safe margin below 14,400
 WARN_AT = 13000
+
+# Per-user daily request tracking
+_user_daily_count = {}
+_user_daily_date = date.today()
+USER_DAILY_LIMIT = 5000
+
+
+def check_daily_limit(user_id):
+    global _user_daily_date, _user_daily_count
+    today = date.today()
+    if today != _user_daily_date:
+        _user_daily_count = {}
+        _user_daily_date = today
+    if user_id == OWNER_TELEGRAM_ID:
+        return
+    _user_daily_count.setdefault(user_id, 0)
+    _user_daily_count[user_id] += 1
+    if _user_daily_count[user_id] > USER_DAILY_LIMIT:
+        raise RuntimeError("You've reached your daily request limit (5,000). Try again tomorrow.")
 
 COMMON_STAPLES = "salt, pepper, sugar, cooking oil, soy sauce, garlic, onion, ginger, eggs, rice, cooking wine, cornstarch, chilli sauce"
 
@@ -146,6 +168,7 @@ def search_web(query, max_results=5, sites=None):
                 snippets.append(f"From: {r.get('href', '')}\nTitle: {r.get('title', '')}\n{r.get('body', '')}")
             return "\n\n".join(snippets) if snippets else None
     except Exception:
+        logger.exception("search_web failed")
         return None
 
 
@@ -192,6 +215,7 @@ def generate_menu(pantry_items, preferences="", diversity_hint=""):
             text = text[start:end+1]
         return json.loads(text)
     except Exception as e:
+        logger.exception("generate_menu failed")
         return None
 
 
@@ -221,6 +245,7 @@ def elaborate_recipe(search_query, pantry_items=None, preferences=""):
         result = _groq_call(prompt, "You are a professional recipe writer. Write detailed, practical recipes.", model=GROQ_QUALITY_MODEL, temperature=0.5, max_tokens=2500)
         return result or f"AI error: No response"
     except Exception as e:
+        logger.exception("elaborate_recipe failed")
         return f"AI error: {e}"
 
 
@@ -244,6 +269,7 @@ def suggest_recipe(user_id, pantry_items, preferences=""):
     try:
         return _groq_call(prompt, "You are a chef assistant. Suggest only real, well-known dishes.", temperature=0.5, max_tokens=1200) or f"AI error"
     except Exception as e:
+        logger.exception("suggest_recipe failed")
         return f"AI error: {e}"
 
 
@@ -311,6 +337,7 @@ def generate_recipe_by_name(recipe_name, preferences=""):
     try:
         return _groq_call(prompt, "You are a professional recipe writer.", model=GROQ_QUALITY_MODEL, temperature=0.5, max_tokens=2500)
     except Exception:
+        logger.exception("generate_recipe_by_name failed")
         return None
 
 
@@ -331,6 +358,7 @@ def nutrition_info(food_name):
             text = text[start:end+1]
         return json.loads(text)
     except Exception:
+        logger.exception("nutrition_info failed")
         return {"calories": 0, "protein_g": 0, "carbs_g": 0, "fat_g": 0, "sodium_mg": 0}
 
 
@@ -351,6 +379,7 @@ def estimate_meal_calories(meal_description):
             text = text[start:end+1]
         return json.loads(text)
     except Exception:
+        logger.exception("estimate_meal_calories failed")
         return {"calories": 0, "protein_g": 0, "sodium_mg": 0}
 
 
@@ -387,6 +416,7 @@ def process_natural_language(user_message, pantry_items=None, recipes=None):
             result["items"] = []
         return result
     except Exception:
+        logger.exception("process_natural_language failed, using fallback")
         msg = user_message.lower()
         if any(w in msg for w in ["add", "put", "store", "have"]):
             return {"action": "add", "items": [], "message": "What items? Try: add chicken and rice"}
@@ -439,6 +469,7 @@ def recognize_food_from_image(base64_image):
                 text = text[start:end+1]
             return json.loads(text)
         except Exception:
+            logger.exception(f"recognize_food_from_image failed with model {model_id}")
             continue
     return {"error": "Could not identify food", "name": "Unknown", "description": "",
             "calories_per_100g": 0, "protein_g_per_100g": 0,
@@ -472,6 +503,7 @@ def scan_receipt_from_image(base64_image):
             if isinstance(result, list):
                 return result
         except Exception:
+            logger.exception(f"scan_receipt_from_image failed with model {model_id}")
             continue
     return []
 
@@ -486,6 +518,7 @@ def recipe_followup(recipe_text, user_question):
     try:
         return _groq_call(prompt, "You are a helpful chef assistant. Answer questions about the current recipe.", temperature=0.5, max_tokens=600) or f"AI error"
     except Exception as e:
+        logger.exception("recipe_followup failed")
         return f"AI error: {e}"
 
 
@@ -506,6 +539,7 @@ def parse_ingredients_from_text(recipe_text):
             text = text[start:end+1]
         return json.loads(text)
     except Exception as e:
+        logger.exception("parse_ingredients_from_text failed")
         return f"Could not parse ingredients: {e}"
 
 
@@ -517,6 +551,7 @@ def generate_shopping_list(recipe_title, missing_ingredients):
     try:
         return _groq_call(prompt, "You are a helpful shopping assistant.", temperature=0.5, max_tokens=400) or f"AI error"
     except Exception as e:
+        logger.exception("generate_shopping_list failed")
         return f"AI error: {e}"
 
 
@@ -534,6 +569,7 @@ def substitute_ingredient(recipe_text, substitution_text):
     try:
         return _groq_call(prompt, "You are a professional recipe writer. Modify the recipe with the requested substitution.", model=GROQ_QUALITY_MODEL, temperature=0.5, max_tokens=2500) or f"AI error"
     except Exception as e:
+        logger.exception("substitute_ingredient failed")
         return f"AI error: {e}"
 
 
@@ -551,6 +587,7 @@ def scale_recipe(recipe_text, factor, target_servings=None):
     try:
         return _groq_call(prompt, "You are a professional recipe writer. Scale the recipe accurately.", model=GROQ_QUALITY_MODEL, temperature=0.5, max_tokens=2500) or f"AI error"
     except Exception as e:
+        logger.exception("scale_recipe failed")
         return f"AI error: {e}"
 
 
@@ -570,6 +607,7 @@ def transcribe_audio(audio_bytes, filename="audio.ogg"):
         os.unlink(path)
         return transcript.text
     except Exception as e:
+        logger.exception("transcribe_audio failed")
         return None
 
 
@@ -607,6 +645,7 @@ def generate_batch_menu(count, cuisine, pantry_items, preferences="", diversity_
             text = text[start:end+1]
         return json.loads(text)
     except Exception:
+        logger.exception("generate_batch_menu failed")
         return None
 
 
@@ -630,6 +669,7 @@ def plan_batch(dish_titles, cuisine):
     try:
         return _groq_call(prompt, "You are a professional chef specialized in meal planning and timing.", model=GROQ_QUALITY_MODEL, temperature=0.5, max_tokens=4000) or f"AI error"
     except Exception as e:
+        logger.exception("plan_batch failed")
         return f"AI error: {e}"
 
 
@@ -667,6 +707,7 @@ def categorize_pantry_items(items):
             return {k.lower().strip(): v for k, v in result.items()}
         return {}
     except Exception:
+        logger.exception("categorize_pantry_items failed")
         return {}
 
 

@@ -19,6 +19,7 @@ from telegram.ext import (
 
 import database as db
 import ai
+from config import OWNER_TELEGRAM_ID
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
@@ -37,6 +38,30 @@ _batch_history = {}  # user_id -> set of dish titles seen across batch regenerat
 
 # Cooking mode state
 _cook_state = {}  # user_id -> {"title": str, "ingredients": list[str], "steps": list[str], "shown": int, "msg_id": int}
+
+# Photo tracking
+_photo_counts = {}  # user_id -> date
+PHOTO_DAILY_LIMIT = 30
+MAX_PHOTO_SIZE = 10 * 1024 * 1024  # 10MB
+
+# Per-user AI call tracking
+_ai_counts = {}  # user_id -> count per day
+_ai_count_date = date.today()
+AI_DAILY_LIMIT = 5000
+
+
+def _check_ai_limit(user_id):
+    global _ai_count_date, _ai_counts
+    today = date.today()
+    if today != _ai_count_date:
+        _ai_counts = {}
+        _ai_count_date = today
+    if user_id == OWNER_TELEGRAM_ID:
+        return
+    _ai_counts.setdefault(user_id, 0)
+    _ai_counts[user_id] += 1
+    if _ai_counts[user_id] > AI_DAILY_LIMIT:
+        raise RuntimeError("You've reached your daily request limit (5,000). Try again tomorrow.")
 
 # Track whether the recipe in _last_suggestion is already saved (hide Save button)
 _is_saved_recipe = {}
@@ -264,6 +289,7 @@ async def recategorize(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def sort_pantry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    _check_ai_limit(user_id)
     items = db.get_pantry(user_id)
     if not items:
         await update.message.reply_text("Pantry is empty. Add items first.")
@@ -426,7 +452,7 @@ async def show_pantry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not groups:
         await update.message.reply_text("Pantry is empty. Tell me what to add!")
         return
-    await update.message.reply_text(_format_pantry_grouped(groups), parse_mode="Markdown")
+    await _reply_chunked(update.message, _format_pantry_grouped(groups), parse_mode="Markdown")
 
 
 async def expiring(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -442,7 +468,7 @@ async def expiring(update: Update, context: ContextTypes.DEFAULT_TYPE):
         remaining = (datetime.strptime(item['expiry_date'], "%Y-%m-%d").date() - date.today()).days
         days_str = f" ({remaining} days left)" if remaining >= 0 else ""
         lines.append(f"• {item['name'].title()} — expires {d}{days_str}")
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    await _reply_chunked(update.message, "\n".join(lines), parse_mode="Markdown")
 
 
 async def expiry_remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -482,6 +508,7 @@ async def send_monthly_reminders(token):
 
 async def suggest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    _check_ai_limit(user_id)
     pantry = db.get_pantry_names(user_id)
     pref = " ".join(context.args) if context.args else ""
     await _do_suggest(update, context, user_id, pantry, pref)
@@ -566,7 +593,33 @@ async def _send_long_message(update, busy, text, keyboard):
     await busy.reply_text(chunks[-1], parse_mode="Markdown", reply_markup=keyboard)
 
 
+async def _reply_chunked(update_or_msg, text, parse_mode=None, reply_markup=None):
+    """Send text, splitting into multiple messages if it exceeds MAX_MSG_LEN."""
+    if len(text) <= MAX_MSG_LEN:
+        await update_or_msg.reply_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
+        return
+    chunks = []
+    remaining = text
+    while remaining:
+        if len(remaining) <= MAX_MSG_LEN:
+            chunks.append(remaining)
+            break
+        split_at = remaining.rfind("\n\n", 0, MAX_MSG_LEN)
+        if split_at < MAX_MSG_LEN // 2:
+            split_at = remaining.rfind("\n", 0, MAX_MSG_LEN)
+        if split_at < MAX_MSG_LEN // 2:
+            split_at = MAX_MSG_LEN
+        else:
+            split_at += 1
+        chunks.append(remaining[:split_at])
+        remaining = remaining[split_at:]
+    for chunk in chunks[:-1]:
+        await update_or_msg.reply_text(chunk, parse_mode=parse_mode)
+    await update_or_msg.reply_text(chunks[-1], parse_mode=parse_mode, reply_markup=reply_markup)
+
+
 async def _elaborate_dish(update, context, user_id, text, dish_index, pantry_items):
+    _check_ai_limit(user_id)
     menu = _last_menu.get(user_id, [])
     if not menu or dish_index is None or dish_index >= len(menu):
         await update.effective_message.reply_text("Could not find that dish. Try /suggest first.")
@@ -636,6 +689,7 @@ async def suggest_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 os.unlink(path)
             except Exception:
+                logger.exception("Failed to clean up temp file")
                 pass
     elif query.data == "suggest_again":
         user_id = query.from_user.id
@@ -784,6 +838,7 @@ async def batch_show_menu(update, context, user_id):
                 reply_markup=InlineKeyboardMarkup(buttons),
             )
         except Exception:
+            logger.exception("Failed to edit message in batch callback, sending new")
             msg = await update.effective_message.reply_text(
                 "\n".join(lines), reply_markup=InlineKeyboardMarkup(buttons)
             )
@@ -845,6 +900,7 @@ async def batch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cookmode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    _check_ai_limit(user_id)
     recipe_text = _last_suggestion.get(user_id)
     if not recipe_text:
         await update.message.reply_text("No recipe to cook. Run /suggest first, then tap a dish.")
@@ -922,6 +978,7 @@ async def cook_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await query.edit_message_text("\n".join(lines), parse_mode="Markdown", reply_markup=keyboard)
     except Exception:
+        logger.exception("Failed to edit recipe callback message")
         pass
 
 
@@ -992,6 +1049,7 @@ async def cook_from_recipe_callback(update: Update, context: ContextTypes.DEFAUL
 
 async def save_recipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    _check_ai_limit(user_id)
     args = context.args
     text = _last_suggestion.get(user_id, "")
 
@@ -1148,6 +1206,7 @@ async def view_recipe_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def canbake(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    _check_ai_limit(user_id)
     pantry = db.get_pantry_names(user_id)
     if not pantry:
         await update.message.reply_text("Your pantry is empty! Add items first.")
@@ -1166,6 +1225,8 @@ async def canbake(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- Nutrition ---
 
 async def log_meal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    _check_ai_limit(user_id)
     args = context.args
     if not args:
         await update.message.reply_text("Usage: `/log chicken rice lunch`", parse_mode="Markdown")
@@ -1226,6 +1287,8 @@ async def calories_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def nutrition(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    _check_ai_limit(user_id)
     args = context.args
     if not args:
         await update.message.reply_text("Usage: `/nutrition chicken breast`", parse_mode="Markdown")
@@ -1313,6 +1376,7 @@ async def weekly(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def shopping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    _check_ai_limit(user_id)
     args = context.args
 
     if args and args[0].isdigit():
@@ -1388,7 +1452,7 @@ async def list_shopping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text:
         await update.message.reply_text("📋 Shopping list is empty. Use `/shop milk, eggs` to add items.")
         return
-    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=keyboard)
+    await _reply_chunked(update.message, text, parse_mode="Markdown", reply_markup=keyboard)
 
 
 async def shop_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1412,6 +1476,7 @@ async def shop_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _handle_user_text(update, context, user_id, text):
     """Core text processing logic used by both handle_text and handle_voice."""
+    _check_ai_limit(user_id)
     pantry = db.get_pantry_names(user_id)
     recipes = db.get_recipes(user_id)
 
@@ -1538,7 +1603,7 @@ async def _handle_user_text(update, context, user_id, text):
         if not groups:
             await msg.edit_text("Your pantry is empty. Tell me what to add!")
             return
-        await msg.edit_text(_format_pantry_grouped(groups), parse_mode="Markdown")
+        await _send_long_message(update, msg, _format_pantry_grouped(groups), None)
 
     elif action == "set_preference":
         if len(items) >= 2:
@@ -1749,11 +1814,24 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     caption = (update.message.caption or "").lower()
     is_receipt = any(w in caption for w in ["receipt", "scan", "recipt"])
 
+    # Photo daily limit check (owner bypass)
+    today = date.today()
+    _photo_counts.setdefault(user_id, {"date": None, "count": 0})
+    if _photo_counts[user_id]["date"] != today:
+        _photo_counts[user_id] = {"date": today, "count": 0}
+    if user_id != OWNER_TELEGRAM_ID and _photo_counts[user_id]["count"] >= PHOTO_DAILY_LIMIT:
+        await update.message.reply_text("Daily photo scan limit reached (30). Try again tomorrow.")
+        return
+    _photo_counts[user_id]["count"] += 1
+
     if is_receipt:
         msg = await update.message.reply_text("\U0001f9fe Scanning receipt...")
         try:
             photo = update.message.photo[-1]
             file = await photo.get_file()
+            if file.file_size and file.file_size > MAX_PHOTO_SIZE:
+                await msg.edit_text("Image too large. Please send a smaller photo (<10MB).")
+                return
             file_bytes = await file.download_as_bytearray()
             b64 = base64.b64encode(file_bytes).decode("utf-8")
             names = ai.scan_receipt_from_image(b64)
@@ -1765,13 +1843,17 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text, keyboard = _render_receipt(user_id)
             await msg.edit_text(text, reply_markup=keyboard)
         except Exception as e:
-            await msg.edit_text(f"Error scanning receipt: {e}")
+            logger.error(f"Receipt scan failed for user {user_id}: {e}")
+            await msg.edit_text("Could not scan this receipt. Try a clearer photo.")
         return
 
     msg = await update.message.reply_text("Analyzing image...")
     try:
         photo = update.message.photo[-1]
         file = await photo.get_file()
+        if file.file_size and file.file_size > MAX_PHOTO_SIZE:
+            await msg.edit_text("Image too large. Please send a smaller photo (<10MB).")
+            return
         file_bytes = await file.download_as_bytearray()
         b64 = base64.b64encode(file_bytes).decode("utf-8")
 
@@ -1793,12 +1875,15 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await msg.edit_text(text, parse_mode="Markdown")
     except Exception as e:
-        await msg.edit_text(f"Error processing image: {e}")
+        logger.error(f"Image analysis failed for user {user_id}: {e}")
+        await msg.edit_text("Could not process this image. Try a clearer photo.")
 
 
 # --- Voice ---
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    db.store_chat_id(update.effective_user.id, update.effective_chat.id)
+    user_id = update.effective_user.id
+    _check_ai_limit(user_id)
+    db.store_chat_id(user_id, update.effective_chat.id)
     msg = await update.message.reply_text("Transcribing voice...")
     try:
         file = await update.message.voice.get_file()
@@ -1811,7 +1896,8 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         await _handle_user_text(update, context, user_id, text)
     except Exception as e:
-        await msg.edit_text(f"Voice processing error: {e}")
+        logger.exception(f"Voice processing failed for user {user_id}")
+        await msg.edit_text("Could not process voice message. Try typing instead.")
 
 
 def _render_shopping_list(user_id):
@@ -1882,7 +1968,7 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Update {update} caused error {context.error}")
     if update and update.effective_message:
         msg = str(context.error)
-        if "Daily Groq request limit" in msg or "Groq daily request" in msg:
+        if "daily request limit" in msg.lower():
             await update.effective_message.reply_text(msg)
         else:
             await update.effective_message.reply_text("Something went wrong. Try again later.")
