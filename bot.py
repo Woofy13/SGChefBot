@@ -1795,18 +1795,17 @@ def _render_shopping_list(user_id):
     unchecked = [i for i in items if not i["checked"]]
     checked = [i for i in items if i["checked"]]
     lines = ["📋 *Shopping List*", ""]
-    for item in unchecked:
-        lines.append(f"⬜ {item['name'].title()}")
-    for item in checked:
-        lines.append(f"✅ {item['name'].title()}")
+    for i, item in enumerate(unchecked, 1):
+        lines.append(f"⬜ {i}. {item['name'].title()}")
+    for i, item in enumerate(checked, len(unchecked) + 1):
+        lines.append(f"✅ {i}. {item['name'].title()}")
     lines.append("")
     lines.append(f"*{len(unchecked)} remaining* · {len(checked)} checked")
     keyboard = []
     row = []
-    for item in items:
-        label = "✅" if item["checked"] else "⬜"
-        row.append(InlineKeyboardButton(label, callback_data=f"shop_toggle_{item['id']}"))
-        if len(row) >= 3:
+    for i, item in enumerate(items, 1):
+        row.append(InlineKeyboardButton(str(i), callback_data=f"shop_toggle_{i}"))
+        if len(row) >= 8:
             keyboard.append(row)
             row = []
     if row:
@@ -1821,8 +1820,10 @@ async def shop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     data = query.data
     if data.startswith("shop_toggle_"):
-        item_id = int(data.split("_")[2])
-        db.toggle_shopping_item(item_id)
+        idx = int(data.split("_")[2])
+        items = db.get_shopping_list(user_id)
+        if 1 <= idx <= len(items):
+            db.toggle_shopping_item(items[idx - 1]["id"])
         text, keyboard = _render_shopping_list(user_id)
         if text:
             await query.edit_message_text(text, parse_mode="Markdown", reply_markup=keyboard)
