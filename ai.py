@@ -637,10 +637,10 @@ def plan_batch(dish_titles, cuisine):
 
 SORT_CATEGORIES = [
     "Proteins & Prepared Meats",
-    "Sauces, Condiments & Fermented",
-    "Spices, Seasonings & Mixes",
     "Vegetables & Fruits",
     "Pantry Staples",
+    "Sauces, Condiments & Fermented",
+    "Spices, Seasonings & Mixes",
     "Other",
 ]
 

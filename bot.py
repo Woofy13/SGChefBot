@@ -385,10 +385,10 @@ def _format_pantry_grouped(groups):
     lines = ["Pantry", ""]
     cat_order = [
         "Proteins & Prepared Meats",
-        "Sauces, Condiments & Fermented",
-        "Spices, Seasonings & Mixes",
         "Vegetables & Fruits",
         "Pantry Staples",
+        "Sauces, Condiments & Fermented",
+        "Spices, Seasonings & Mixes",
     ]
     seen = set()
     for cat in cat_order:
