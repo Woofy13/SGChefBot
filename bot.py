@@ -333,8 +333,7 @@ async def add_pantry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not clean_items:
         await update.message.reply_text("Could not identify items to add. Try: `/add chicken, rice`")
         return
-    for item in clean_items:
-        db.add_pantry_item(update.effective_user.id, item, expiry=expiry)
+    db.add_pantry_items(update.effective_user.id, clean_items, expiry=expiry)
     reply = f"Added {len(clean_items)} item(s): {', '.join(clean_items)}"
     if expiry:
         reply += f" (exp {_fmt_date(expiry)})"
@@ -571,6 +570,43 @@ async def suggest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pantry = db.get_pantry_names(user_id)
     pref = " ".join(context.args) if context.args else ""
     await _do_suggest(update, context, user_id, pantry, pref)
+
+
+async def improvise(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    _check_ai_limit(user_id)
+    expiring = db.get_expiring_items(user_id, 30)
+    if not expiring:
+        await update.message.reply_text("✅ Nothing expiring in the next month! Your pantry is fresh.")
+        return
+    expiring_names = [e["name"] for e in expiring]
+    pantry = db.get_pantry_names(user_id)
+    pref = " ".join(context.args) if context.args else ""
+
+    msg = await update.message.reply_text("♻️ Finding recipes for your expiring items...")
+    menu = ai.generate_improvise_menu(expiring_names, pantry, pref)
+    _last_menu[user_id] = menu
+    _last_preference[user_id] = pref
+
+    if not menu:
+        await msg.edit_text("Couldn't find recipes for those ingredients. Try adding more to your pantry.")
+        return
+
+    _menu_history[user_id] = {d["title"] for d in menu if d.get("title")}
+
+    lines = ["♻️ *Using expiring ingredients:*"]
+    for i, dish in enumerate(menu, 1):
+        lines.append(f"\n{i}. {dish.get('title', '?')}")
+        lines.append(f"   {dish.get('description', '')}")
+
+    buttons = [[
+        InlineKeyboardButton("1", callback_data="elaborate_0"),
+        InlineKeyboardButton("2", callback_data="elaborate_1"),
+        InlineKeyboardButton("3", callback_data="elaborate_2"),
+        InlineKeyboardButton("4", callback_data="elaborate_3"),
+        InlineKeyboardButton("5", callback_data="elaborate_4"),
+    ]]
+    await msg.edit_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(buttons))
 
 
 async def _do_suggest(update, context, user_id, pantry, pref):
@@ -1444,15 +1480,18 @@ async def stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text, keyboard = _build_stats_message(user_id)
         if text:
             await query.edit_message_text(text, parse_mode="Markdown", reply_markup=keyboard)
+
+
+async def canbake(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     _check_ai_limit(user_id)
     pantry = db.get_pantry_names(user_id)
     if not pantry:
-        await update.message.reply_text("Your pantry is empty! Add items first.")
+        await update.effective_message.reply_text("Your pantry is empty! Add items first.")
         return
 
     items_str = ", ".join(pantry)
-    msg = await update.message.reply_text("Checking your pantry...")
+    msg = await update.effective_message.reply_text("Checking your pantry...")
     equip = db.get_user_preference(user_id, "equipment")
     pref = f"Equipment: {equip}.\n" if equip else ""
     pref += "Suggest recipes I can cook RIGHT NOW using ONLY ingredients from this list plus common staples (salt, pepper, oil, sugar, garlic, onion, eggs, rice, soy sauce). Mark any [BUY] items I still need."
@@ -1659,8 +1698,7 @@ async def shopping(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ You have all the ingredients! Time to cook.")
         return
 
-    for item in missing:
-        db.add_to_shopping_list(user_id, item.split(",")[0].split("(")[0].strip())
+    db.add_to_shopping_list_batch(user_id, [item.split(",")[0].split("(")[0].strip() for item in missing])
 
     msg = await update.message.reply_text("🛒 Generating shopping list...")
     result = ai.generate_shopping_list(title, missing)
@@ -1680,8 +1718,7 @@ async def shop_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Usage: `/shop milk, eggs, chicken`")
         return
     items = [x.strip().lower() for x in " ".join(args).split(",") if x.strip()]
-    for item in items:
-        db.add_to_shopping_list(user_id, item)
+    db.add_to_shopping_list_batch(user_id, items)
     await update.message.reply_text(f"📋 Added {len(items)} item(s) to your shopping list: {', '.join(items)}\nUse `/list` to view.")
 
 
@@ -1821,8 +1858,7 @@ async def _handle_user_text(update, context, user_id, text):
 
     if action == "add":
         expiry = _parse_expiry(result.get("expiry_date", ""))
-        for item in items:
-            db.add_pantry_item(user_id, item, expiry=expiry)
+        db.add_pantry_items(user_id, items, expiry=expiry)
         if expiry and reply and "(exp" not in reply:
             reply += f" (exp {_fmt_date(expiry)})"
         await msg.edit_text(reply)
@@ -2179,10 +2215,7 @@ async def shop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if text:
             await query.edit_message_text(text, parse_mode="Markdown", reply_markup=keyboard)
     elif data == "shop_clear_checked":
-        items = db.get_shopping_list(user_id)
-        for item in items:
-            if item["checked"]:
-                db.remove_from_shopping_list(user_id, item["name"])
+        db.clear_checked_items(user_id)
         text, keyboard = _render_shopping_list(user_id)
         if text:
             await query.edit_message_text(text, parse_mode="Markdown", reply_markup=keyboard)
@@ -2235,6 +2268,7 @@ def create_app(token: str):
     app.add_handler(CommandHandler("set", set_pref))
     app.add_handler(CommandHandler("equipment", equipment))
     app.add_handler(CommandHandler("suggest", suggest))
+    app.add_handler(CommandHandler("improvise", improvise))
     app.add_handler(CommandHandler("save", save_recipe))
     app.add_handler(CommandHandler("recipes", list_recipes))
     app.add_handler(CommandHandler("recipe", list_recipes))  # alias

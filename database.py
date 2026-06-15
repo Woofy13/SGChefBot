@@ -151,6 +151,16 @@ def _init_sqlite():
 
     except Exception:
         pass
+    for idx in [
+        "CREATE INDEX IF NOT EXISTS idx_recipes_user ON recipes(user_id)",
+        "CREATE INDEX IF NOT EXISTS idx_cooking_log_user ON cooking_log(user_id, cooked_date)",
+        "CREATE INDEX IF NOT EXISTS idx_meal_logs_user_date ON meal_logs(user_id, logged_date)",
+        "CREATE INDEX IF NOT EXISTS idx_pantry_user_expiry ON pantry(user_id, expiry_date)",
+    ]:
+        try:
+            _execute(conn, idx)
+        except Exception:
+            pass
     _commit(conn)
     _close(conn)
 
@@ -234,6 +244,16 @@ def _init_pg():
             cooked_date TEXT DEFAULT (CURRENT_DATE)
         );
     """)
+    for idx in [
+        "CREATE INDEX IF NOT EXISTS idx_recipes_user ON recipes(user_id)",
+        "CREATE INDEX IF NOT EXISTS idx_cooking_log_user ON cooking_log(user_id, cooked_date)",
+        "CREATE INDEX IF NOT EXISTS idx_meal_logs_user_date ON meal_logs(user_id, logged_date)",
+        "CREATE INDEX IF NOT EXISTS idx_pantry_user_expiry ON pantry(user_id, expiry_date)",
+    ]:
+        try:
+            cur.execute(idx)
+        except Exception:
+            pass
     _commit(conn)
     _close(conn)
     # Migration: add UNIQUE for databases created without it
@@ -316,6 +336,19 @@ def add_pantry_item(user_id, name, quantity="1", unit="", expiry="", category=No
         _q("INSERT INTO pantry (user_id, name, quantity, unit, expiry_date, category) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(user_id, name) DO UPDATE SET quantity = excluded.quantity, unit = excluded.unit, expiry_date = COALESCE(excluded.expiry_date, pantry.expiry_date), category = COALESCE(excluded.category, pantry.category)"),
         (user_id, name, quantity, unit, expiry if expiry else None, category),
     )
+    _commit(conn)
+    _close(conn)
+
+
+def add_pantry_items(user_id, items, expiry=""):
+    conn = get_connection()
+    for name in items:
+        name = name.strip().lower()
+        category = categorize_item(name)
+        _execute(conn,
+            _q("INSERT INTO pantry (user_id, name, quantity, unit, expiry_date, category) VALUES (?, ?, '1', '', ?, ?) ON CONFLICT(user_id, name) DO UPDATE SET quantity = excluded.quantity, unit = excluded.unit, expiry_date = COALESCE(excluded.expiry_date, pantry.expiry_date), category = COALESCE(excluded.category, pantry.category)"),
+            (user_id, name, expiry if expiry else None, category),
+        )
     _commit(conn)
     _close(conn)
 
@@ -594,10 +627,29 @@ def get_shopping_list(user_id):
     return rows
 
 
+def add_to_shopping_list_batch(user_id, items):
+    conn = get_connection()
+    for name in items:
+        name = name.strip().lower()
+        _execute(conn,
+            _q("INSERT INTO shopping_list (user_id, name) VALUES (?, ?) ON CONFLICT(user_id, name) DO UPDATE SET checked = 0"),
+            (user_id, name),
+        )
+    _commit(conn)
+    _close(conn)
+
+
 def remove_from_shopping_list(user_id, name):
     name = name.strip().lower()
     conn = get_connection()
     _execute(conn, _q("DELETE FROM shopping_list WHERE user_id = ? AND name = ?"), (user_id, name))
+    _commit(conn)
+    _close(conn)
+
+
+def clear_checked_items(user_id):
+    conn = get_connection()
+    _execute(conn, _q("DELETE FROM shopping_list WHERE user_id = ? AND checked = 1"), (user_id,))
     _commit(conn)
     _close(conn)
 
@@ -629,61 +681,62 @@ def log_cooked(user_id, dish_name):
 
 def get_cooking_stats(user_id):
     conn = get_connection()
-    cur = _execute(conn, _q("SELECT COUNT(*) as total FROM cooking_log WHERE user_id = ?"), (user_id,))
-    total = _fetchone(cur)["total"]
+    
+    # Combined: total, unique, first_date
+    cur = _execute(conn, _q("SELECT COUNT(*) as total, COUNT(DISTINCT dish_name) as unique_dishes, MIN(cooked_date) as first_date FROM cooking_log WHERE user_id = ?"), (user_id,))
+    row = _fetchone(cur)
+    total = row["total"] if row else 0
     if not total:
         _close(conn)
         return {}
-    cur = _execute(conn, _q("SELECT COUNT(DISTINCT dish_name) as unique_dishes FROM cooking_log WHERE user_id = ?"), (user_id,))
-    unique_dishes = _fetchone(cur)["unique_dishes"]
+    unique_dishes = row["unique_dishes"]
+    first_cook_date = row["first_date"]
+    
+    # Most cooked dish
     cur = _execute(conn, _q("SELECT dish_name, COUNT(*) as cnt FROM cooking_log WHERE user_id = ? GROUP BY dish_name ORDER BY cnt DESC LIMIT 1"), (user_id,))
     top = _fetchone(cur)
     most_cooked = top["dish_name"] if top else ""
     most_cooked_count = top["cnt"] if top else 0
-    cur = _execute(conn, _q("SELECT cooked_date FROM cooking_log WHERE user_id = ? ORDER BY cooked_date DESC LIMIT 1"), (user_id,))
-    last = _fetchone(cur)
-    first_cook_date = None
-    if total:
-        cur = _execute(conn, _q("SELECT MIN(cooked_date) as first FROM cooking_log WHERE user_id = ?"), (user_id,))
-        row = _fetchone(cur)
-        first_cook_date = row["first"] if row else None
-    # Current streak
-    cur = _execute(conn, _q("SELECT DISTINCT cooked_date FROM cooking_log WHERE user_id = ? ORDER BY cooked_date DESC"), (user_id,))
-    dates = [r["cooked_date"] for r in _fetchall(cur)]
+    
+    # All dates in one pass (streak, month, weekend, avg)
+    cur = _execute(conn, _q("SELECT cooked_date FROM cooking_log WHERE user_id = ? ORDER BY cooked_date DESC"), (user_id,))
+    all_dates = [r["cooked_date"] for r in _fetchall(cur)]
+    _close(conn)
+    
+    from datetime import datetime as dt
+    today = date.today()
+    month_start = f"{today.year:04d}-{today.month:02d}-01"
+    dt_dates = [dt.strptime(d, "%Y-%m-%d").date() for d in all_dates]
+    
+    # Streak (deduplicated by date)
     streak = 0
-    if dates:
-        from datetime import datetime as dt
-        streak_dates = [dt.strptime(d, "%Y-%m-%d").date() for d in dates]
+    if dt_dates:
+        seen = set()
+        unique_ordered = []
+        for d in dt_dates:
+            if d not in seen:
+                seen.add(d)
+                unique_ordered.append(d)
         streak = 1
-        for i in range(1, len(streak_dates)):
-            if (streak_dates[i - 1] - streak_dates[i]).days == 1:
+        for i in range(1, len(unique_ordered)):
+            if (unique_ordered[i - 1] - unique_ordered[i]).days == 1:
                 streak += 1
             else:
                 break
-    # This month count
-    today = date.today()
-    month_start = f"{today.year:04d}-{today.month:02d}-01"
-    cur = _execute(conn, _q("SELECT COUNT(*) as cnt FROM cooking_log WHERE user_id = ? AND cooked_date >= ?"),
-                   (user_id, month_start))
-    month_count = _fetchone(cur)["cnt"]
-    # Weekend percentage
-    cur = _execute(conn, _q("SELECT cooked_date FROM cooking_log WHERE user_id = ?"), (user_id,))
-    all_dates = [r["cooked_date"] for r in _fetchall(cur)]
-    weekend_pct = 0
-    if all_dates:
-        from datetime import datetime as dt
-        dt_dates = [dt.strptime(d, "%Y-%m-%d").date() for d in all_dates]
-        weekend_count = sum(1 for d in dt_dates if d.weekday() >= 5)
-        weekend_pct = round(weekend_count / len(dt_dates) * 100)
-    # Days since first cook
+    
+    # Month count & weekend % from same date list
+    month_count = sum(1 for d in dt_dates if d.isoformat() >= month_start)
+    weekend_count = sum(1 for d in dt_dates if d.weekday() >= 5)
+    weekend_pct = round(weekend_count / len(dt_dates) * 100) if dt_dates else 0
+    
+    # Days since first cook, avg per week
     days_since_first = 0
     avg_per_week = 0
     if first_cook_date and total:
-        from datetime import datetime as dt
         first = dt.strptime(first_cook_date, "%Y-%m-%d").date()
         days_since_first = (today - first).days or 1
         avg_per_week = round(total / (days_since_first / 7), 1)
-    _close(conn)
+    
     return {
         "total": total,
         "unique_dishes": unique_dishes,

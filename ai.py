@@ -149,7 +149,7 @@ def _groq_call(prompt, system_msg, model=None, temperature=0.5, max_tokens=600):
                 )
 
             if attempt < 2:
-                sleep_time = max(int(reset_after), 30) if reset_after else 60
+                sleep_time = int(reset_after) if reset_after and int(reset_after) <= 10 else 5
                 time.sleep(sleep_time)
                 continue
             raise
@@ -385,6 +385,17 @@ def estimate_meal_calories(meal_description):
 
 
 def process_natural_language(user_message, pantry_items=None, recipes=None):
+    # Quick keyword routes — skip AI for simple intents
+    msg = user_message.lower().strip()
+    if any(w in msg for w in ["what do i have", "whats in my", "show my", "list my"]):
+        msg_tokens = msg.split()
+        if any(w in msg_tokens for w in ["pantry", "food", "ingredient", "list", "item"]):
+            return {"action": "list_pantry", "items": [], "message": ""}
+    if msg in ("help", "what can you do", "what can you", "commands", "/start"):
+        return {"action": "help", "items": [], "message": ""}
+    if msg.strip("!? ") in ("yes", "no", "ok", "okay", "sure", "thanks", "thank you"):
+        return {"action": "chat", "items": [], "message": "You're welcome! Let me know if you need anything."}
+
     pantry_str = ", ".join(pantry_items) if pantry_items else "empty"
 
     prompt = (
@@ -448,64 +459,58 @@ def process_natural_language(user_message, pantry_items=None, recipes=None):
 
 
 def recognize_food_from_image(base64_image):
-    for model_id in [GROQ_VISION_MODEL, "meta-llama/llama-3.2-11b-vision-instruct",
-                     "llama-3.2-90b-vision-preview"]:
-        try:
-            resp = client.chat.completions.create(
-                model=model_id,
-                messages=[{"role": "user", "content": [
-                    {"type": "text", "text": (
-                        "Identify this food. Return ONLY JSON with keys: name, description, "
-                        "calories_per_100g, protein_g_per_100g, carbs_g_per_100g, "
-                        "fat_g_per_100g, sodium_mg_per_100g."
-                    )},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}},
-                ]}],
-                temperature=0.3, max_tokens=500,
-            )
-            text = resp.choices[0].message.content.strip()
-            text = text.replace("```json", "").replace("```", "").strip()
-            start, end = text.find("{"), text.rfind("}")
-            if start >= 0 and end > start:
-                text = text[start:end+1]
-            return json.loads(text)
-        except Exception:
-            logger.exception(f"recognize_food_from_image failed with model {model_id}")
-            continue
-    return {"error": "Could not identify food", "name": "Unknown", "description": "",
-            "calories_per_100g": 0, "protein_g_per_100g": 0,
-            "carbs_g_per_100g": 0, "fat_g_per_100g": 0, "sodium_mg_per_100g": 0}
+    try:
+        resp = client.chat.completions.create(
+            model=GROQ_VISION_MODEL,
+            messages=[{"role": "user", "content": [
+                {"type": "text", "text": (
+                    "Identify this food. Return ONLY JSON with keys: name, description, "
+                    "calories_per_100g, protein_g_per_100g, carbs_g_per_100g, "
+                    "fat_g_per_100g, sodium_mg_per_100g."
+                )},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}},
+            ]}],
+            temperature=0.3, max_tokens=500,
+        )
+        text = resp.choices[0].message.content.strip()
+        text = text.replace("```json", "").replace("```", "").strip()
+        start, end = text.find("{"), text.rfind("}")
+        if start >= 0 and end > start:
+            text = text[start:end+1]
+        return json.loads(text)
+    except Exception:
+        logger.exception("recognize_food_from_image failed")
+        return {"error": "Could not identify food", "name": "Unknown", "description": "",
+                "calories_per_100g": 0, "protein_g_per_100g": 0,
+                "carbs_g_per_100g": 0, "fat_g_per_100g": 0, "sodium_mg_per_100g": 0}
 
 
 def scan_receipt_from_image(base64_image):
-    for model_id in [GROQ_VISION_MODEL, "meta-llama/llama-3.2-11b-vision-instruct",
-                     "llama-3.2-90b-vision-preview"]:
-        try:
-            resp = client.chat.completions.create(
-                model=model_id,
-                messages=[{"role": "user", "content": [
-                    {"type": "text", "text": (
-                        "Extract the food and grocery item names from this receipt photo. "
-                        "Return ONLY a JSON array of strings with just the item names, e.g. "
-                        '["whole milk", "chicken breast", "white rice", "garlic"]. '
-                        "Skip non-food items (cleaning products, plastic bags, toiletries, etc.). "
-                        "Include only edible food and drink items. Normalize names to lower case."
-                    )},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}},
-                ]}],
-                temperature=0.1, max_tokens=500,
-            )
-            text = resp.choices[0].message.content.strip()
-            text = text.replace("```json", "").replace("```", "").strip()
-            start, end = text.find("["), text.rfind("]")
-            if start >= 0 and end > start:
-                text = text[start:end+1]
-            result = json.loads(text)
-            if isinstance(result, list):
-                return result
-        except Exception:
-            logger.exception(f"scan_receipt_from_image failed with model {model_id}")
-            continue
+    try:
+        resp = client.chat.completions.create(
+            model=GROQ_VISION_MODEL,
+            messages=[{"role": "user", "content": [
+                {"type": "text", "text": (
+                    "Extract the food and grocery item names from this receipt photo. "
+                    "Return ONLY a JSON array of strings with just the item names, e.g. "
+                    '["whole milk", "chicken breast", "white rice", "garlic"]. '
+                    "Skip non-food items (cleaning products, plastic bags, toiletries, etc.). "
+                    "Include only edible food and drink items. Normalize names to lower case."
+                )},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}},
+            ]}],
+            temperature=0.1, max_tokens=500,
+        )
+        text = resp.choices[0].message.content.strip()
+        text = text.replace("```json", "").replace("```", "").strip()
+        start, end = text.find("["), text.rfind("]")
+        if start >= 0 and end > start:
+            text = text[start:end+1]
+        result = json.loads(text)
+        if isinstance(result, list):
+            return result
+    except Exception:
+        logger.exception("scan_receipt_from_image failed")
     return []
 
 
@@ -710,6 +715,46 @@ def categorize_pantry_items(items):
     except Exception:
         logger.exception("categorize_pantry_items failed")
         return {}
+
+
+# --- Improvise (use expiring ingredients) ---
+
+def generate_improvise_menu(expiring_items, pantry_items, preferences=""):
+    items_str = ", ".join(pantry_items) if pantry_items else ""
+    expiring_str = ", ".join(expiring_items)
+
+    query = "recipe using " + expiring_str
+    web = search_web(query, 5)
+
+    prompt = (
+        f"I have these ingredients expiring soon and MUST use at least 75% of them:\n{expiring_str}\n\n"
+        f"Other available pantry items: {items_str}\n"
+        f"Common staples (always available): {COMMON_STAPLES}\n"
+    )
+    if web:
+        prompt += f"\nWeb references:\n{web}\n"
+    prompt += (
+        f"\nUser preferences: {preferences}\n"
+        "Suggest exactly 5 dishes that use at least 75% of the expiring ingredients listed above. "
+        "You can supplement with pantry items and common staples. "
+        "Return ONLY a JSON array of objects with keys: title (str), description (one line), search_query (str). "
+        'Example: [{"title":"Chicken Soup","description":"Hearty soup with chicken and vegetables","search_query":"chicken soup recipe"}]'
+    )
+
+    try:
+        text = _groq_call(prompt, "You are a chef focused on reducing food waste. Return ONLY a JSON array.", temperature=0.5, max_tokens=600)
+        if not text:
+            return None
+        text = text.strip()
+        text = text.replace("```json", "").replace("```", "").strip()
+        start = text.find("[")
+        end = text.rfind("]")
+        if start >= 0 and end > start:
+            text = text[start:end+1]
+        return json.loads(text)
+    except Exception:
+        logger.exception("generate_improvise_menu failed")
+        return None
 
 
 # --- Recipe Import ---
