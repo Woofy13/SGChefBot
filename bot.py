@@ -1047,14 +1047,17 @@ def _build_recipe_list(recipes):
 async def view_recipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if not args:
-        await update.message.reply_text("Usage: `/view <id>` or `/view <title>`", parse_mode="Markdown")
+        await update.message.reply_text("Usage: `/view <number>` or `/view <title>`", parse_mode="Markdown")
         return
     user_id = update.effective_user.id
     query_str = " ".join(args)
 
     recipe = None
     if query_str.isdigit():
-        recipe = db.get_recipe(user_id, int(query_str))
+        idx = int(query_str)
+        recipes = db.get_recipes(user_id)
+        if 1 <= idx <= len(recipes):
+            recipe = db.get_recipe(user_id, recipes[idx - 1]["id"])
     if not recipe:
         recipe = db.get_recipe_by_title(user_id, query_str)
 
