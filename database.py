@@ -330,6 +330,15 @@ def get_pantry_grouped(user_id):
     return groups
 
 
+def recategorize_by_map(user_id, cat_map):
+    conn = get_connection()
+    for name, cat in cat_map.items():
+        _execute(conn, _q("UPDATE pantry SET category = ? WHERE user_id = ? AND name = ?"),
+                 (cat, user_id, name.strip().lower()))
+    _commit(conn)
+    _close(conn)
+
+
 def recategorize_pantry(user_id):
     conn = get_connection()
     cur = _execute(conn, _q("SELECT id, name FROM pantry WHERE user_id = ?"), (user_id,))

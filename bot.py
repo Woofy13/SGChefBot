@@ -192,7 +192,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "  /remove milk                     remove an item\n"
         "  /pantry                          show your pantry\n"
         "  /expiring [days]                 items expiring soon\n"
-        "  /recategorize                    fix item categories\n"
+        "  /recategorize                    fix item categories (basic)\n"
+        "  /sort                           AI-powered pantry sorting\n"
         "  /expiryremind on/off             toggle monthly expiry reminders\n\n"
         "*Recipes & Cooking*\n\n"
         "  /suggest [preference]            AI recipe suggestions\n"
@@ -259,6 +260,24 @@ async def add_pantry(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def recategorize(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db.recategorize_pantry(update.effective_user.id)
     await update.message.reply_text("Recategorized all pantry items.")
+
+
+async def sort_pantry(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    items = db.get_pantry(user_id)
+    if not items:
+        await update.message.reply_text("Pantry is empty. Add items first.")
+        return
+    names = [item["name"] for item in items]
+    msg = await update.message.reply_text("🧹 Sorting pantry with AI...")
+    cat_map = ai.categorize_pantry_items(names)
+    if not cat_map:
+        await msg.edit_text("Could not sort pantry with AI. Try /recategorize instead.")
+        return
+    db.recategorize_by_map(user_id, cat_map)
+    groups = db.get_pantry_grouped(user_id)
+    formatted = _format_pantry_grouped(groups)
+    await msg.edit_text(f"*Sorted Pantry*\n\n{formatted}", parse_mode="Markdown")
 
 
 async def set_pref(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -368,6 +387,7 @@ def _format_pantry_grouped(groups):
         "Proteins & Prepared Meats",
         "Sauces, Condiments & Fermented",
         "Spices, Seasonings & Mixes",
+        "Vegetables & Fruits",
         "Pantry Staples",
     ]
     seen = set()
@@ -380,10 +400,10 @@ def _format_pantry_grouped(groups):
         if not subs:
             continue
         seen.add(cat)
-        lines.append(cat)
+        lines.append(f"*{cat}*")
         for sub, items in subs.items():
             if sub:
-                lines.append(f"  {sub}:")
+                lines.append(f"  *{sub}:*")
             for item in sorted(items, key=lambda x: x["name"]):
                 lines.append(_fmt_item_line(item))
         lines.append("")
@@ -393,7 +413,7 @@ def _format_pantry_grouped(groups):
         if top in seen:
             continue
         seen.add(top)
-        lines.append(top)
+        lines.append(f"*{top}*")
         for item in sorted(items, key=lambda x: x["name"]):
             lines.append(_fmt_item_line(item))
         lines.append("")
@@ -411,7 +431,7 @@ async def show_pantry(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def expiring(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
-    days = int(args[0]) if args else 3
+    days = int(args[0]) if args else 30
     items = db.get_expiring_items(update.effective_user.id, days)
     if not items:
         await update.message.reply_text(f"✅ Nothing expiring in {days} days!")
@@ -1886,6 +1906,7 @@ def create_app(token: str):
     app.add_handler(CommandHandler("pantry", show_pantry))
     app.add_handler(CommandHandler("expiring", expiring))
     app.add_handler(CommandHandler("recategorize", recategorize))
+    app.add_handler(CommandHandler("sort", sort_pantry))
     app.add_handler(CommandHandler("set", set_pref))
     app.add_handler(CommandHandler("equipment", equipment))
     app.add_handler(CommandHandler("suggest", suggest))

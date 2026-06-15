@@ -633,6 +633,43 @@ def plan_batch(dish_titles, cuisine):
         return f"AI error: {e}"
 
 
+# --- Pantry Sorting ---
+
+SORT_CATEGORIES = [
+    "Proteins & Prepared Meats",
+    "Sauces, Condiments & Fermented",
+    "Spices, Seasonings & Mixes",
+    "Vegetables & Fruits",
+    "Pantry Staples",
+    "Other",
+]
+
+
+def categorize_pantry_items(items):
+    items_str = "\n".join(f"- {item}" for item in items)
+    cats_str = "\n".join(f"{i+1}. {c}" for i, c in enumerate(SORT_CATEGORIES))
+    prompt = (
+        f"Categorize each pantry item into exactly one of these categories:\n{cats_str}\n\n"
+        f"Items:\n{items_str}\n\n"
+        "Return ONLY a JSON object mapping each item (lowercase) to a category name from the list above. "
+        'Example: {"chicken": "Proteins & Prepared Meats", "broccoli": "Vegetables & Fruits", "soy sauce": "Sauces, Condiments & Fermented"}'
+    )
+    try:
+        text = _groq_call(prompt, "You are a kitchen inventory assistant. Respond only with JSON.", temperature=0.1, max_tokens=1000)
+        if not text:
+            return {}
+        text = text.strip().replace("```json", "").replace("```", "").strip()
+        start, end = text.find("{"), text.rfind("}")
+        if start >= 0 and end > start:
+            text = text[start: end + 1]
+        result = json.loads(text)
+        if isinstance(result, dict):
+            return {k.lower().strip(): v for k, v in result.items()}
+        return {}
+    except Exception:
+        return {}
+
+
 # --- Cooking Mode ---
 
 def parse_cook_recipe(recipe_text):
