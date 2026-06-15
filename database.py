@@ -268,6 +268,16 @@ CATEGORY_MAP = {
     "salt": "Spices, Seasonings & Mixes",
     "black pepper": "Spices, Seasonings & Mixes",
     "sugar": "Spices, Seasonings & Mixes",
+    "chicken": "Proteins & Prepared Meats / Fresh/Chilled",
+    "chicken thigh": "Proteins & Prepared Meats / Fresh/Chilled",
+    "chicken breast": "Proteins & Prepared Meats / Fresh/Chilled",
+    "chicken wings": "Proteins & Prepared Meats / Fresh/Chilled",
+    "beef": "Proteins & Prepared Meats / Fresh/Chilled",
+    "pork": "Proteins & Prepared Meats / Fresh/Chilled",
+    "fish": "Proteins & Prepared Meats / Fresh/Chilled",
+    "salmon": "Proteins & Prepared Meats / Fresh/Chilled",
+    "shrimp": "Proteins & Prepared Meats / Fresh/Chilled",
+    "tofu": "Proteins & Prepared Meats / Fresh/Chilled",
     "eggs": "Proteins & Prepared Meats / Fresh/Chilled",
     "butter": "Proteins & Prepared Meats / Fresh/Chilled",
     "olive oil blend": "Pantry Staples",
@@ -316,7 +326,7 @@ def get_pantry_grouped(user_id):
     groups = {}
     for item in items:
         cat = item.get("category", "") or "Other"
-        groups.setdefault(cat, []).append(item["name"].title())
+        groups.setdefault(cat, []).append(item)
     return groups
 
 

@@ -354,6 +354,14 @@ async def remove_pantry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"🗑️ Removed `{item}` from pantry", parse_mode="Markdown")
 
 
+def _fmt_item_line(item):
+    name = item["name"].title()
+    exp = item.get("expiry_date")
+    if exp:
+        name += f" (exp {_fmt_date(exp)})"
+    return f"  - {name}"
+
+
 def _format_pantry_grouped(groups):
     lines = ["Pantry", ""]
     cat_order = [
@@ -364,32 +372,30 @@ def _format_pantry_grouped(groups):
     ]
     seen = set()
     for cat in cat_order:
-        # Collect subcategories under this top-level group
         subs = {}
-        for full_cat, names in groups.items():
+        for full_cat, items in groups.items():
             if full_cat.startswith(cat):
                 sub = full_cat.replace(cat, "").strip(" /")
-                subs.setdefault(sub, []).extend(names)
+                subs.setdefault(sub, []).extend(items)
         if not subs:
             continue
         seen.add(cat)
         lines.append(cat)
-        for sub, names in subs.items():
+        for sub, items in subs.items():
             if sub:
                 lines.append(f"  {sub}:")
-            for name in sorted(names):
-                lines.append(f"  - {name}")
+            for item in sorted(items, key=lambda x: x["name"]):
+                lines.append(_fmt_item_line(item))
         lines.append("")
 
-    # Remaining categories
-    for full_cat, names in groups.items():
+    for full_cat, items in groups.items():
         top = full_cat.split("/")[0].strip()
         if top in seen:
             continue
         seen.add(top)
         lines.append(top)
-        for name in sorted(names):
-            lines.append(f"  - {name}")
+        for item in sorted(items, key=lambda x: x["name"]):
+            lines.append(_fmt_item_line(item))
         lines.append("")
 
     return "\n".join(lines).strip()
