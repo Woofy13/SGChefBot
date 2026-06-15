@@ -426,7 +426,7 @@ async def show_pantry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not groups:
         await update.message.reply_text("Pantry is empty. Tell me what to add!")
         return
-    await update.message.reply_text(_format_pantry_grouped(groups))
+    await update.message.reply_text(_format_pantry_grouped(groups), parse_mode="Markdown")
 
 
 async def expiring(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1538,7 +1538,7 @@ async def _handle_user_text(update, context, user_id, text):
         if not groups:
             await msg.edit_text("Your pantry is empty. Tell me what to add!")
             return
-        await msg.edit_text(_format_pantry_grouped(groups))
+        await msg.edit_text(_format_pantry_grouped(groups), parse_mode="Markdown")
 
     elif action == "set_preference":
         if len(items) >= 2:
