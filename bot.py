@@ -1805,8 +1805,17 @@ async def _handle_user_text(update, context, user_id, text):
             msg = await update.effective_message.reply_text("Applying substitution...")
             result = ai.substitute_ingredient(recipe, text)
             _last_suggestion[user_id] = result
+            _is_saved_recipe[user_id] = False
+            mid = result.replace("**", "").replace("*", "").strip()
+            _pending_cooked[user_id] = mid.split("\n")[0] if mid else "Recipe"
             sanitized = _sanitize_markdown(result)
-            await msg.edit_text(sanitized, parse_mode="Markdown")
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("💾 Save Recipe", callback_data="save_last"),
+                 InlineKeyboardButton("👨‍🍳 Cook Mode", callback_data="cook_recipe")],
+                [InlineKeyboardButton("📤 Export", callback_data="export_last"),
+                 InlineKeyboardButton("✅ Cooked!", callback_data="cooked")],
+            ])
+            await msg.edit_text(sanitized, parse_mode="Markdown", reply_markup=keyboard)
             return
 
         scale_match = re.search(r"(?:for|serve)\s*(\d+)\s*(?:people|person|servings|pax)", t, re.I)
@@ -1825,8 +1834,17 @@ async def _handle_user_text(update, context, user_id, text):
             msg = await update.effective_message.reply_text(f"Scaling recipe by {factor}x...")
             result = ai.scale_recipe(recipe, factor)
             _last_suggestion[user_id] = result
+            _is_saved_recipe[user_id] = False
+            mid = result.replace("**", "").replace("*", "").strip()
+            _pending_cooked[user_id] = mid.split("\n")[0] if mid else "Recipe"
             sanitized = _sanitize_markdown(result)
-            await msg.edit_text(sanitized, parse_mode="Markdown")
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("💾 Save Recipe", callback_data="save_last"),
+                 InlineKeyboardButton("👨‍🍳 Cook Mode", callback_data="cook_recipe")],
+                [InlineKeyboardButton("📤 Export", callback_data="export_last"),
+                 InlineKeyboardButton("✅ Cooked!", callback_data="cooked")],
+            ])
+            await msg.edit_text(sanitized, parse_mode="Markdown", reply_markup=keyboard)
             return
 
     # Recipe follow-up: if user is asking a question about the current recipe
@@ -1999,9 +2017,16 @@ async def _handle_user_text(update, context, user_id, text):
                     recipe = db.get_recipe(user_id, r["id"])
                     break
         if recipe:
-            await update.effective_message.reply_text(
-                _format_recipe(recipe), parse_mode="Markdown"
-            )
+            text = _format_recipe(recipe)
+            _last_suggestion[user_id] = text
+            _is_saved_recipe[user_id] = True
+            _pending_cooked[user_id] = recipe["title"]
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("👨‍🍳 Cook Mode", callback_data="cook_recipe"),
+                 InlineKeyboardButton("📤 Export", callback_data="export_last"),
+                 InlineKeyboardButton("✅ Cooked!", callback_data="cooked")],
+            ])
+            await update.effective_message.reply_text(text, parse_mode="Markdown", reply_markup=keyboard)
         else:
             await update.effective_message.reply_text(
                 "Recipe not found. Say 'show my recipes' to see your saved recipes."
