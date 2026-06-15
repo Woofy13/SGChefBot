@@ -1288,9 +1288,19 @@ async def weekly(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def shopping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     args = context.args
-    title = " ".join(args) if args else ""
 
-    if title:
+    if args and args[0].isdigit():
+        idx = int(args[0])
+        recipes = db.get_recipes(user_id)
+        if 1 <= idx <= len(recipes):
+            recipe = db.get_recipe(user_id, recipes[idx - 1]["id"])
+            ingredients = recipe["ingredients"]
+            title = recipe["title"]
+        else:
+            await update.message.reply_text(f"Recipe #{idx} not found. Use `/recipes` to see your saved recipes.", parse_mode="Markdown")
+            return
+    elif args:
+        title = " ".join(args)
         recipe = db.get_recipe_by_title(user_id, title)
         if not recipe:
             await update.message.reply_text(f"Recipe '{title}' not found. Use `/recipes` to see saved recipes.", parse_mode="Markdown")
@@ -1300,7 +1310,7 @@ async def shopping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         last_text = _last_suggestion.get(user_id, "")
         if not last_text:
-            await update.message.reply_text("No recipe to shop for. Use `/shopping <recipe name>` or get a suggestion first.", parse_mode="Markdown")
+            await update.message.reply_text("No recipe to shop for. Use `/shopping <number>` or get a suggestion first.", parse_mode="Markdown")
             return
         await update.message.reply_text("🛒 Extracting ingredients from last suggestion...")
         ingredients = ai.parse_ingredients_from_text(last_text)
