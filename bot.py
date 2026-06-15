@@ -1873,9 +1873,12 @@ async def _handle_user_text(update, context, user_id, text):
     if action == "add":
         expiry = _parse_expiry(result.get("expiry_date", ""))
         db.add_pantry_items(user_id, items, expiry=expiry)
-        if expiry and reply and "(exp" not in reply:
-            reply += f" (exp {_fmt_date(expiry)})"
-        await msg.edit_text(reply)
+        pantry_items = db.get_pantry(user_id)
+        names = [i["name"] for i in pantry_items]
+        cat_map = ai.categorize_pantry_items(names)
+        if cat_map:
+            db.recategorize_by_map(user_id, cat_map)
+        await msg.edit_text("Added and sorted!")
 
     elif action == "remove":
         for item in items:
