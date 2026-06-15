@@ -4,7 +4,6 @@ logging.getLogger("primp").setLevel(logging.WARNING)
 import base64
 import os
 import tempfile
-import json
 import re
 from datetime import datetime, date, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -600,16 +599,14 @@ async def improvise(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append(f"   {dish.get('description', '')}")
 
     buttons = [[
-        InlineKeyboardButton("1", callback_data="elaborate_0"),
-        InlineKeyboardButton("2", callback_data="elaborate_1"),
-        InlineKeyboardButton("3", callback_data="elaborate_2"),
-        InlineKeyboardButton("4", callback_data="elaborate_3"),
-        InlineKeyboardButton("5", callback_data="elaborate_4"),
+        InlineKeyboardButton(str(i), callback_data=f"elaborate_{i-1}")
+        for i in range(1, len(menu) + 1)
     ]]
     await msg.edit_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(buttons))
 
 
 async def _do_suggest(update, context, user_id, pantry, pref):
+    _check_ai_limit(user_id)
     equip = db.get_user_preference(user_id, "equipment")
     diet = db.get_user_preference(user_id, "diet_profile")
     extra = f"Equipment: {equip}." if equip else ""
@@ -1752,7 +1749,6 @@ async def shop_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _handle_user_text(update, context, user_id, text):
     """Core text processing logic used by both handle_text and handle_voice."""
-    _check_ai_limit(user_id)
     pantry = db.get_pantry_names(user_id)
     recipes = db.get_recipes(user_id)
 

@@ -389,7 +389,7 @@ def process_natural_language(user_message, pantry_items=None, recipes=None):
     msg = user_message.lower().strip()
     if any(w in msg for w in ["what do i have", "whats in my", "show my", "list my"]):
         msg_tokens = msg.split()
-        if any(w in msg_tokens for w in ["pantry", "food", "ingredient", "list", "item"]):
+        if any(w in msg_tokens for w in ["pantry", "food", "ingredient", "ingredients", "list", "item"]):
             return {"action": "list_pantry", "items": [], "message": ""}
     if msg in ("help", "what can you do", "what can you", "commands", "/start"):
         return {"action": "help", "items": [], "message": ""}
