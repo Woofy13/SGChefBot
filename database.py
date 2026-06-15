@@ -219,12 +219,18 @@ def _init_pg():
             UNIQUE(user_id, name)
         );
     """)
-    try:
-        cur.execute("ALTER TABLE shopping_list ADD UNIQUE (user_id, name)")
-    except Exception:
-        pass
     _commit(conn)
     _close(conn)
+    # Migration: add UNIQUE for databases created without it
+    try:
+        c = get_connection()
+        try:
+            c.cursor().execute("ALTER TABLE shopping_list ADD UNIQUE (user_id, name)")
+            c.commit()
+        finally:
+            c.close()
+    except Exception:
+        pass
 
 
 # --- Pantry ---
