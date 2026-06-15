@@ -3,6 +3,7 @@ import base64
 import re
 import time
 import logging
+import html.parser
 from datetime import date
 from openai import OpenAI, RateLimitError
 from ddgs import DDGS
@@ -709,6 +710,148 @@ def categorize_pantry_items(items):
     except Exception:
         logger.exception("categorize_pantry_items failed")
         return {}
+
+
+# --- Recipe Import ---
+
+class _HTMLStripper(html.parser.HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self._text = []
+    def handle_data(self, data):
+        self._text.append(data)
+    def get_text(self):
+        return " ".join(self._text)
+
+
+def _extract_jsonld_recipe(html):
+    for match in re.finditer(
+        r'<script[^>]*type="application/ld\+json"[^>]*>(.*?)</script>',
+        html, re.DOTALL | re.IGNORECASE,
+    ):
+        try:
+            data = json.loads(match.group(1))
+            items = data if isinstance(data, list) else [data]
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                for candidate in [item] + item.get("@graph", []):
+                    if not isinstance(candidate, dict):
+                        continue
+                    types = candidate.get("@type", [])
+                    if isinstance(types, str):
+                        types = [types]
+                    if "Recipe" in types:
+                        return candidate
+        except (json.JSONDecodeError, KeyError):
+            continue
+    return None
+
+
+def _format_iso_duration(dur):
+    m = re.match(r'^PT(?:(\d+)H)?(?:(\d+)M)?$', dur)
+    if not m:
+        return dur
+    hrs = m.group(1)
+    mins = m.group(2)
+    parts = []
+    if hrs: parts.append(f"{hrs} hr")
+    if mins: parts.append(f"{mins} min")
+    return " ".join(parts) if parts else dur
+
+
+def _format_jsonld_recipe(recipe):
+    title = recipe.get("name", "Imported Recipe")
+
+    ingredients = recipe.get("recipeIngredient", [])
+    if isinstance(ingredients, str):
+        ingredients = [ingredients]
+
+    raw_instructions = recipe.get("recipeInstructions", [])
+    steps = []
+    if isinstance(raw_instructions, str):
+        steps = [raw_instructions]
+    elif isinstance(raw_instructions, list):
+        for step in raw_instructions:
+            if isinstance(step, dict):
+                steps.append(step.get("text", ""))
+            else:
+                steps.append(str(step))
+
+    nutrition = recipe.get("nutrition") or {}
+    n_cal = nutrition.get("calories", "")
+    n_protein = nutrition.get("proteinContent", "")
+    n_sodium = nutrition.get("sodiumContent", "")
+    total_time = recipe.get("totalTime", "")
+    desc = recipe.get("description", "")
+
+    lines = [f"**🍴 {title}**"]
+    if total_time:
+        lines.append(f"\n**Time Overview**\nTotal: {_format_iso_duration(total_time)}")
+    if desc:
+        lines.append(f"\n**💡 About**\n{desc}")
+    if ingredients:
+        lines.append("\n**🥩 Ingredients**")
+        for ing in ingredients:
+            lines.append(f"- {ing}")
+    if steps:
+        lines.append("\n**👨‍🍳 Step-by-Step Instructions**")
+        for i, step in enumerate(steps, 1):
+            lines.append(f"{i}. {step}")
+    if n_cal or n_protein or n_sodium:
+        parts = []
+        if n_cal: parts.append(f"Calories: {n_cal}")
+        if n_protein: parts.append(f"Protein: {n_protein}")
+        if n_sodium: parts.append(f"Sodium: {n_sodium}")
+        lines.append(f"\n**📊 Nutrition**\n{' | '.join(parts)}")
+
+    return "\n".join(lines)
+
+
+def import_recipe_from_url(url):
+    try:
+        import httpx
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+        }
+        with httpx.Client(verify=False, timeout=15, follow_redirects=True) as client:
+            resp = client.get(url, headers=headers)
+            resp.raise_for_status()
+            html = resp.text
+    except httpx.HTTPStatusError:
+        logger.warning("import_recipe_from_url: HTTP %d for %s", resp.status_code, url)
+        return None
+    except Exception:
+        logger.exception("import_recipe_from_url: fetch failed for %s", url)
+        return None
+
+    recipe = _extract_jsonld_recipe(html)
+    if recipe:
+        formatted = _format_jsonld_recipe(recipe)
+        if formatted:
+            return formatted
+
+    stripper = _HTMLStripper()
+    stripper.feed(html)
+    text = stripper.get_text()
+    prompt = (
+        "Extract the complete recipe from the following webpage content. "
+        "Ignore all stories, advertisements, navigation, comments, and unrelated text. "
+        "Return ONLY the recipe.\n\n"
+        f"Webpage content:\n{text[:15000]}\n\n"
+        f"{DETAILED_FORMAT}"
+    )
+    try:
+        return _groq_call(
+            prompt,
+            "You extract recipes from web pages. Return only the recipe in the requested format.",
+            model=GROQ_QUALITY_MODEL, temperature=0.3, max_tokens=2500,
+        )
+    except Exception:
+        logger.exception("import_recipe_from_url: LLM extraction failed")
+        return None
 
 
 # --- Cooking Mode ---

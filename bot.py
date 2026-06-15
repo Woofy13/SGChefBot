@@ -286,6 +286,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "  /view <id>                       view a saved recipe\n"
         "  /delete <id>                     delete a recipe\n"
         "  /export <name>                   export as a file\n"
+        "  /import <url>                    import a recipe from a website\n"
         "  /batch [count]                   plan a multi-dish meal\n"
         "  /cookmode                        step-by-step cooking mode\n\n"
         "*Shopping List*\n\n"
@@ -1274,6 +1275,44 @@ async def view_recipe_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.message.reply_text("Recipe not found.")
 
 
+async def import_recipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    _check_ai_limit(user_id)
+    url = " ".join(context.args).strip()
+    if not url:
+        await update.message.reply_text("Usage: `/import <recipe-url>`\n\nImport a recipe from any cooking website.")
+        return
+    if not url.startswith("http://") and not url.startswith("https://"):
+        await update.message.reply_text("Please provide a valid URL starting with http:// or https://")
+        return
+
+    msg = await update.message.reply_text("Fetching recipe...")
+    result = ai.import_recipe_from_url(url)
+    if not result:
+        await msg.edit_text(
+            "Could not extract a recipe from that URL.\n\n"
+            "Some sites block automated access. Try:\n"
+            "  - A different recipe site (bbcgoodfood.com, bonappetit.com work well)\n"
+            "  - Paste the recipe text directly and I'll parse it"
+        )
+        return
+
+    _last_suggestion[user_id] = result
+    _is_saved_recipe[user_id] = False
+    mid = result.replace("**", "").replace("*", "").strip()
+    title_line = mid.split("\n")[0] if mid else "Imported Recipe"
+    _pending_cooked[user_id] = title_line
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("💾 Save Recipe", callback_data="save_last"),
+         InlineKeyboardButton("👨‍🍳 Cook Mode", callback_data="cook_recipe")],
+        [InlineKeyboardButton("📤 Export", callback_data="export_last"),
+         InlineKeyboardButton("✅ Cooked!", callback_data="cooked")],
+    ])
+    sanitized = _sanitize_markdown(result)
+    await _send_long_message(update, msg, sanitized, keyboard)
+
+
 async def cooked_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -2215,6 +2254,7 @@ def create_app(token: str):
     app.add_handler(CommandHandler("diet", diet))
     app.add_handler(CommandHandler("expiryremind", expiry_remind))
     app.add_handler(CommandHandler("export", export_recipe))
+    app.add_handler(CommandHandler("import", import_recipe))
     app.add_handler(CommandHandler("batch", batch_start))
     app.add_handler(CommandHandler("cookmode", cookmode))
     app.add_handler(CommandHandler("cook", cookmode))  # alias
