@@ -116,6 +116,12 @@ def _init_sqlite():
             logged_date TEXT DEFAULT (date('now')),
             meal_type TEXT DEFAULT ''
         );
+        CREATE TABLE IF NOT EXISTS cooking_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            dish_name TEXT NOT NULL,
+            cooked_date TEXT DEFAULT (date('now'))
+        );
         CREATE TABLE IF NOT EXISTS user_goals (
             user_id INTEGER PRIMARY KEY,
             daily_calories INTEGER DEFAULT 1900,
@@ -218,6 +224,14 @@ def _init_pg():
             added_date TEXT DEFAULT (CURRENT_DATE),
             checked INTEGER DEFAULT 0,
             UNIQUE(user_id, name)
+        );
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS cooking_log (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            dish_name TEXT NOT NULL,
+            cooked_date TEXT DEFAULT (CURRENT_DATE)
         );
     """)
     _commit(conn)
@@ -598,5 +612,102 @@ def clear_shopping_list(user_id):
 def toggle_shopping_item(item_id):
     conn = get_connection()
     _execute(conn, _q("UPDATE shopping_list SET checked = 1 - checked WHERE id = ?"), (item_id,))
+    _commit(conn)
+    _close(conn)
+
+
+# --- Cooking Stats ---
+
+
+def log_cooked(user_id, dish_name):
+    conn = get_connection()
+    _execute(conn, _q("INSERT INTO cooking_log (user_id, dish_name) VALUES (?, ?)"),
+             (user_id, dish_name.strip().lower()))
+    _commit(conn)
+    _close(conn)
+
+
+def get_cooking_stats(user_id):
+    conn = get_connection()
+    cur = _execute(conn, _q("SELECT COUNT(*) as total FROM cooking_log WHERE user_id = ?"), (user_id,))
+    total = _fetchone(cur)["total"]
+    if not total:
+        _close(conn)
+        return {}
+    cur = _execute(conn, _q("SELECT COUNT(DISTINCT dish_name) as unique_dishes FROM cooking_log WHERE user_id = ?"), (user_id,))
+    unique_dishes = _fetchone(cur)["unique_dishes"]
+    cur = _execute(conn, _q("SELECT dish_name, COUNT(*) as cnt FROM cooking_log WHERE user_id = ? GROUP BY dish_name ORDER BY cnt DESC LIMIT 1"), (user_id,))
+    top = _fetchone(cur)
+    most_cooked = top["dish_name"] if top else ""
+    most_cooked_count = top["cnt"] if top else 0
+    cur = _execute(conn, _q("SELECT cooked_date FROM cooking_log WHERE user_id = ? ORDER BY cooked_date DESC LIMIT 1"), (user_id,))
+    last = _fetchone(cur)
+    first_cook_date = None
+    if total:
+        cur = _execute(conn, _q("SELECT MIN(cooked_date) as first FROM cooking_log WHERE user_id = ?"), (user_id,))
+        row = _fetchone(cur)
+        first_cook_date = row["first"] if row else None
+    # Current streak
+    cur = _execute(conn, _q("SELECT DISTINCT cooked_date FROM cooking_log WHERE user_id = ? ORDER BY cooked_date DESC"), (user_id,))
+    dates = [r["cooked_date"] for r in _fetchall(cur)]
+    streak = 0
+    if dates:
+        from datetime import datetime as dt
+        streak_dates = [dt.strptime(d, "%Y-%m-%d").date() for d in dates]
+        streak = 1
+        for i in range(1, len(streak_dates)):
+            if (streak_dates[i - 1] - streak_dates[i]).days == 1:
+                streak += 1
+            else:
+                break
+    # This month count
+    today = date.today()
+    month_start = f"{today.year:04d}-{today.month:02d}-01"
+    cur = _execute(conn, _q("SELECT COUNT(*) as cnt FROM cooking_log WHERE user_id = ? AND cooked_date >= ?"),
+                   (user_id, month_start))
+    month_count = _fetchone(cur)["cnt"]
+    # Weekend percentage
+    cur = _execute(conn, _q("SELECT cooked_date FROM cooking_log WHERE user_id = ?"), (user_id,))
+    all_dates = [r["cooked_date"] for r in _fetchall(cur)]
+    weekend_pct = 0
+    if all_dates:
+        from datetime import datetime as dt
+        dt_dates = [dt.strptime(d, "%Y-%m-%d").date() for d in all_dates]
+        weekend_count = sum(1 for d in dt_dates if d.weekday() >= 5)
+        weekend_pct = round(weekend_count / len(dt_dates) * 100)
+    # Days since first cook
+    days_since_first = 0
+    avg_per_week = 0
+    if first_cook_date and total:
+        from datetime import datetime as dt
+        first = dt.strptime(first_cook_date, "%Y-%m-%d").date()
+        days_since_first = (today - first).days or 1
+        avg_per_week = round(total / (days_since_first / 7), 1)
+    _close(conn)
+    return {
+        "total": total,
+        "unique_dishes": unique_dishes,
+        "most_cooked": most_cooked,
+        "most_cooked_count": most_cooked_count,
+        "streak": streak,
+        "month_count": month_count,
+        "weekend_pct": weekend_pct,
+        "avg_per_week": avg_per_week,
+        "days_since_first": days_since_first,
+        "first_cook_date": first_cook_date,
+    }
+
+
+def get_cooked_dishes(user_id):
+    conn = get_connection()
+    cur = _execute(conn, _q("SELECT dish_name, COUNT(*) as cnt FROM cooking_log WHERE user_id = ? GROUP BY dish_name ORDER BY cnt DESC, dish_name"), (user_id,))
+    rows = _fetchall(cur)
+    _close(conn)
+    return [(r["dish_name"], r["cnt"]) for r in rows]
+
+
+def clear_cooking_log(user_id):
+    conn = get_connection()
+    _execute(conn, _q("DELETE FROM cooking_log WHERE user_id = ?"), (user_id,))
     _commit(conn)
     _close(conn)

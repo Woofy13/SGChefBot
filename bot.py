@@ -39,6 +39,9 @@ _batch_history = {}  # user_id -> set of dish titles seen across batch regenerat
 # Cooking mode state
 _cook_state = {}  # user_id -> {"title": str, "ingredients": list[str], "steps": list[str], "shown": int, "msg_id": int}
 
+# Pending cooked dish tracking
+_pending_cooked = {}  # user_id -> dish_name (str) or list of dish names (batch)
+
 # Photo tracking
 _photo_counts = {}  # user_id -> date
 PHOTO_DAILY_LIMIT = 30
@@ -62,6 +65,61 @@ def _check_ai_limit(user_id):
     _ai_counts[user_id] += 1
     if _ai_counts[user_id] > AI_DAILY_LIMIT:
         raise RuntimeError("You've reached your daily request limit (5,000). Try again tomorrow.")
+
+
+RANKS = [
+    (0, "Raw Egg", "🥚"),
+    (15, "Novice Chef", "🍳"),
+    (30, "Line Cook", "👨‍🍳"),
+    (45, "Sous Chef", "👩‍🍳"),
+    (60, "Head Chef", "🍲"),
+    (75, "Executive Chef", "🏆"),
+    (90, "Master Chef", "🌟"),
+    (105, "Iron Chef", "👑"),
+    (120, "Culinary Legend", "🎖️"),
+    (135, "Grill Master", "🔥"),
+    (150, "Kitchen God", "🏅"),
+    (165, "Michelin Star", "⭐"),
+    (180, "Five-Star General", "🚀"),
+    (195, "Pantry Overlord", "🗿"),
+    (210, "The Food Lord", "👁️"),
+    (225, "Gordon RAMSES", "🤖"),
+    (240, "Quantum Cook", "🌌"),
+    (255, "Infinite Sous", "♾️"),
+    (270, "The Final Boss", "⚡"),
+    (999999, "Just a Person Who Cooks", "🍳"),
+]
+
+
+def _get_rank(total):
+    for threshold, title, emoji in RANKS:
+        if total <= threshold:
+            return f"{emoji} {title}"
+    return RANKS[-1][1]  # fallback
+
+
+def _get_badges(stats, dishes):
+    badges = []
+    total = stats.get("total", 0)
+    unique = stats.get("unique_dishes", 0)
+    streak = stats.get("streak", 0)
+    weekend_pct = stats.get("weekend_pct", 0)
+    top_dish_count = dishes[0][1] if dishes else 0
+
+    if top_dish_count >= 5:
+        badges.append("🐔 Serial Cooker")
+    if unique >= 20:
+        badges.append("🌍 Explorer")
+    if streak >= 30:
+        badges.append("🔥 Inferno")
+    elif streak >= 7:
+        badges.append("🔥 On Fire")
+    if weekend_pct >= 70:
+        badges.append("☕ Weekend Warrior")
+    if total > 0 and top_dish_count / total >= 0.8:
+        badges.append("🎯 One-Trick Pony")
+    return badges
+
 
 # Track whether the recipe in _last_suggestion is already saved (hide Save button)
 _is_saved_recipe = {}
@@ -635,11 +693,13 @@ async def _elaborate_dish(update, context, user_id, text, dish_index, pantry_ite
     result = ai.elaborate_recipe(dish.get("search_query", dish["title"]), pantry_items, prefs)
     _last_suggestion[user_id] = result
     _is_saved_recipe[user_id] = False
+    _pending_cooked[user_id] = dish["title"]
 
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("💾 Save Recipe", callback_data="save_last"),
          InlineKeyboardButton("👨‍🍳 Cook Mode", callback_data="cook_recipe")],
-        [InlineKeyboardButton("📤 Export", callback_data="export_last")],
+        [InlineKeyboardButton("📤 Export", callback_data="export_last"),
+         InlineKeyboardButton("✅ Cooked!", callback_data="cooked")],
     ])
     sanitized = _sanitize_markdown(result)
     await _send_long_message(update, busy, sanitized, keyboard)
@@ -880,10 +940,12 @@ async def batch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = f"**Batch Cooking Plan**\n\n{plan}"
         sanitized = _sanitize_markdown(text)
         _last_suggestion[user_id] = text
+        _pending_cooked[user_id] = titles
         _batch_state.pop(user_id, None)
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📤 Export", callback_data="export_last")],
-        ])
+        dish_buttons = [[InlineKeyboardButton(f"✅ {i+1}. {t[:30]}", callback_data=f"cooked_{i}")] for i, t in enumerate(titles)]
+        keyboard = InlineKeyboardMarkup(
+            dish_buttons + [[InlineKeyboardButton("📤 Export", callback_data="export_last")]]
+        )
         await query.edit_message_text(sanitized, parse_mode="Markdown", reply_markup=keyboard)
 
     elif data.startswith("batch_toggle_"):
@@ -990,16 +1052,20 @@ async def cook_done_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     recipe_text = _last_suggestion.get(user_id, "")
     if recipe_text:
         saved = _is_saved_recipe.get(user_id, False)
+        title = recipe_text.split("\n")[0].replace("**", "").replace("*", "").strip()
+        _pending_cooked[user_id] = title
         if saved:
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("👨‍🍳 Cook Mode", callback_data="cook_recipe"),
-                 InlineKeyboardButton("📤 Export", callback_data="export_last")],
+                 InlineKeyboardButton("📤 Export", callback_data="export_last"),
+                 InlineKeyboardButton("✅ Cooked!", callback_data="cooked")],
             ])
         else:
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("💾 Save Recipe", callback_data="save_last"),
                  InlineKeyboardButton("👨‍🍳 Cook Mode", callback_data="cook_recipe")],
-                [InlineKeyboardButton("📤 Export", callback_data="export_last")],
+                [InlineKeyboardButton("📤 Export", callback_data="export_last"),
+                 InlineKeyboardButton("✅ Cooked!", callback_data="cooked")],
             ])
         sanitized = _sanitize_markdown(recipe_text)
         await query.edit_message_text(sanitized, parse_mode="Markdown", reply_markup=keyboard)
@@ -1152,9 +1218,11 @@ async def view_recipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = _format_recipe(recipe)
     _last_suggestion[update.effective_user.id] = text
     _is_saved_recipe[update.effective_user.id] = True
+    _pending_cooked[update.effective_user.id] = recipe["title"]
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("👨‍🍳 Cook Mode", callback_data="cook_recipe"),
-         InlineKeyboardButton("📤 Export", callback_data="export_last")],
+         InlineKeyboardButton("📤 Export", callback_data="export_last"),
+         InlineKeyboardButton("✅ Cooked!", callback_data="cooked")],
     ])
     sanitized = _sanitize_markdown(text)
     await update.message.reply_text(sanitized, parse_mode="Markdown", reply_markup=keyboard)
@@ -1194,9 +1262,11 @@ async def view_recipe_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         text = _format_recipe(recipe)
         _last_suggestion[user_id] = text
         _is_saved_recipe[user_id] = True
+        _pending_cooked[user_id] = recipe["title"]
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("👨‍🍳 Cook Mode", callback_data="cook_recipe"),
-             InlineKeyboardButton("📤 Export", callback_data="export_last")],
+             InlineKeyboardButton("📤 Export", callback_data="export_last"),
+             InlineKeyboardButton("✅ Cooked!", callback_data="cooked")],
         ])
         sanitized = _sanitize_markdown(text)
         await query.message.reply_text(sanitized, parse_mode="Markdown", reply_markup=keyboard)
@@ -1204,7 +1274,137 @@ async def view_recipe_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.message.reply_text("Recipe not found.")
 
 
-async def canbake(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cooked_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    data = query.data
+
+    if data == "cooked":
+        title = _pending_cooked.get(user_id)
+        if not title:
+            await query.edit_message_text("No dish to log. Try viewing or cooking a recipe first.")
+            return
+        if isinstance(title, list):
+            await query.edit_message_text("Use the numbered buttons to log each dish individually.")
+            return
+        db.log_cooked(user_id, title)
+        await query.edit_message_text(f"✅ Logged *{title.title()}* as cooked!", parse_mode="Markdown")
+        _pending_cooked.pop(user_id, None)
+
+    elif data.startswith("cooked_"):
+        idx = int(data.split("_")[1])
+        titles = _pending_cooked.get(user_id)
+        if not isinstance(titles, list) or idx >= len(titles):
+            await query.edit_message_text("Batch cooking data not found. Try generating the plan again.")
+            return
+        title = titles[idx]
+        db.log_cooked(user_id, title)
+        remaining = [t for i, t in enumerate(titles) if i != idx]
+        if remaining:
+            _pending_cooked[user_id] = remaining
+            dish_buttons = [[InlineKeyboardButton(f"✅ {i+1}. {t[:30]}", callback_data=f"cooked_{i}")] for i, t in enumerate(remaining)]
+            dish_buttons.append([InlineKeyboardButton("📤 Export", callback_data="export_last")])
+            await query.edit_message_text(
+                f"✅ Logged *{title.title()}* as cooked!\n\nLog the remaining dishes:",
+                parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(dish_buttons)
+            )
+        else:
+            _pending_cooked.pop(user_id, None)
+            await query.edit_message_text("✅ All dishes logged as cooked!", parse_mode="Markdown")
+
+
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    text, keyboard = _build_stats_message(user_id)
+    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=keyboard)
+
+
+def _build_stats_message(user_id):
+    stats = db.get_cooking_stats(user_id)
+    if not stats or stats.get("total", 0) == 0:
+        return "📊 *Cooking Stats*\n\nNo dishes cooked yet. Start by viewing or cooking a recipe and tapping ✅ Cooked!", None
+
+    total = stats["total"]
+    unique = stats["unique_dishes"]
+    most_cooked = stats["most_cooked"]
+    most_cooked_count = stats["most_cooked_count"]
+    streak = stats["streak"]
+    month_count = stats["month_count"]
+    weekend_pct = stats["weekend_pct"]
+    avg_per_week = stats["avg_per_week"]
+    first_date = _fmt_date(stats["first_cook_date"]) if stats.get("first_cook_date") else "N/A"
+
+    dishes = db.get_cooked_dishes(user_id)
+    rank = _get_rank(total)
+    badges = _get_badges(stats, dishes)
+
+    lines = ["📊 *Cooking Stats*", ""]
+    lines.append(f"🍳 Total dishes cooked: *{total}*")
+    lines.append(f"👑 Rank: *{rank}*")
+    lines.append("")
+    lines.append(f"🌟 Unique dishes: {unique}")
+    lines.append(f"🏆 Most cooked: *{most_cooked.title()}* ({most_cooked_count}×)")
+    lines.append(f"🔥 Current streak: {streak} day{'s' if streak != 1 else ''}")
+    lines.append(f"📅 This month: {month_count} dishes")
+    lines.append(f"📆 Avg: {avg_per_week} dishes/week")
+    lines.append(f"☕ Weekend cooking: {weekend_pct}%")
+    lines.append(f"🗓️ First cook: {first_date}")
+
+    if badges:
+        lines.append("")
+        lines.append("*Badges*")
+        lines.append(" ".join(badges))
+
+    keyboard_buttons = []
+    if dishes:
+        keyboard_buttons.append([InlineKeyboardButton("📋 Dish History", callback_data="stats_dishes")])
+    keyboard_buttons.append([InlineKeyboardButton("🗑️ Reset Stats", callback_data="reset_stats_start")])
+    keyboard = InlineKeyboardMarkup(keyboard_buttons) if keyboard_buttons else None
+    return "\n".join(lines), keyboard
+
+
+async def stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    data = query.data
+
+    if data == "stats_dishes":
+        dishes = db.get_cooked_dishes(user_id)
+        if not dishes:
+            await query.edit_message_text("No dishes cooked yet.")
+            return
+        lines = ["📋 *Dish History*", ""]
+        for i, (name, cnt) in enumerate(dishes, 1):
+            lines.append(f"{i}. {name.title()} ×{cnt}")
+        text = "\n".join(lines)
+        back_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="stats_back")]])
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=back_keyboard)
+
+    elif data == "stats_back":
+        text, keyboard = _build_stats_message(user_id)
+        if text:
+            await query.edit_message_text(text, parse_mode="Markdown", reply_markup=keyboard)
+
+    elif data == "reset_stats_start":
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Yes, wipe everything", callback_data="reset_stats_confirm"),
+             InlineKeyboardButton("❌ Cancel", callback_data="reset_stats_cancel")],
+        ])
+        await query.edit_message_text(
+            "⚠️ *Are you sure?*\nThis will permanently delete all your cooking stats.\n\nType `/stats` again later to start fresh.",
+            parse_mode="Markdown", reply_markup=keyboard
+        )
+
+    elif data == "reset_stats_confirm":
+        db.clear_cooking_log(user_id)
+        await query.edit_message_text("🗑️ All cooking stats have been wiped.")
+
+    elif data == "reset_stats_cancel":
+        text, keyboard = _build_stats_message(user_id)
+        if text:
+            await query.edit_message_text(text, parse_mode="Markdown", reply_markup=keyboard)
     user_id = update.effective_user.id
     _check_ai_limit(user_id)
     pantry = db.get_pantry_names(user_id)
@@ -2019,6 +2219,9 @@ def create_app(token: str):
     app.add_handler(CommandHandler("cookmode", cookmode))
     app.add_handler(CommandHandler("cook", cookmode))  # alias
     app.add_handler(CallbackQueryHandler(elaborate_callback, pattern="^elaborate_[0-4]$"))
+    app.add_handler(CommandHandler("stats", stats))
+    app.add_handler(CallbackQueryHandler(cooked_callback, pattern=r"^(cooked|cooked_\d+)$"))
+    app.add_handler(CallbackQueryHandler(stats_callback, pattern="^(stats_|reset_stats_|stats_back)"))
     app.add_handler(CallbackQueryHandler(suggest_callback, pattern="^(save_last|suggest_again|export_last)$"))
     app.add_handler(CallbackQueryHandler(batch_callback, pattern="^batch_"))
     app.add_handler(CallbackQueryHandler(cook_callback, pattern="^cook_next$"))
