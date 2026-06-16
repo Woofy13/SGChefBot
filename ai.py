@@ -192,6 +192,10 @@ def detect_cuisine(query):
 def generate_menu(pantry_items, preferences="", diversity_hint=""):
     items_str = ", ".join(pantry_items) if pantry_items else ""
     query = re.sub(r"(suggest|recipe|make|cook|give me|i want|can i|what can)", "", preferences or items_str, flags=re.I).strip()
+    # Strip metadata lines (Equipment, Diet, etc.) from search query
+    query = re.sub(r'\nEquipment:.*(\n|$)', '', query, flags=re.I | re.DOTALL)
+    query = re.sub(r'\nDiet:.*(\n|$)', '', query, flags=re.I | re.DOTALL)
+    query = query.strip()
     sites = detect_cuisine(query)
     web = search_web(query, 5, sites)
 
@@ -270,6 +274,8 @@ def elaborate_recipe(search_query, pantry_items=None, preferences=""):
 def suggest_recipe(user_id, pantry_items, preferences=""):
     items_str = ", ".join(pantry_items) if pantry_items else "nothing specific"
     search_query = re.sub(r"(suggest|recipe|make|cook|give me|i want|can i)", "", preferences, flags=re.I).strip()
+    search_query = re.sub(r'\nEquipment:.*(\n|$)', '', search_query, flags=re.I | re.DOTALL).strip()
+    search_query = re.sub(r'\nDiet:.*(\n|$)', '', search_query, flags=re.I | re.DOTALL).strip()
     web = search_web(search_query or items_str, 3, ALL_SITES)
 
     prompt = (
