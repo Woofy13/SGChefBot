@@ -2513,6 +2513,20 @@ async def receipt_confirm_callback(update: Update, context: ContextTypes.DEFAULT
     await query.edit_message_text(f"\u2705 Added {len(added)} item(s) to pantry: {', '.join(added)}")
 
 
+async def clear_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+    sent = await update.effective_message.reply_text("🗑 Cleared")
+    import asyncio
+    await asyncio.sleep(1)
+    try:
+        await sent.delete()
+    except Exception:
+        pass
+
+
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Update {update} caused error {context.error}")
     if update and update.effective_message:
@@ -2571,6 +2585,7 @@ def create_app(token: str):
     app.add_handler(CommandHandler("export", export_recipe))
     app.add_handler(CommandHandler("import", import_recipe))
     app.add_handler(CommandHandler("batch", batch_start))
+    app.add_handler(CommandHandler("clear", clear_chat))
     app.add_handler(CommandHandler("cookmode", cookmode))
     app.add_handler(CommandHandler("cook", cookmode))  # alias
     app.add_handler(CallbackQueryHandler(elaborate_callback, pattern="^elaborate_[0-4]$"))
