@@ -194,12 +194,19 @@ def generate_menu(pantry_items, preferences="", diversity_hint=""):
     )
     if web:
         prompt += f"\nWeb references:\n{web}\n"
+    has_diet = "diet:" in preferences.lower()
+    bias = (
+        "Most suggestions should align with the user's diet preference."
+        if has_diet else
+        "Lean toward protein-forward dishes unless the user requests otherwise."
+    )
     prompt += (
         f"\n{diversity_hint}\n"
         "Suggest exactly 5 dishes based on the request and web references. "
         "The pantry list is just FYI — you can suggest ANY dish the user might enjoy. "
         "Feel free to ignore the pantry entirely. "
         "Only suggest real, well-known dishes. "
+        f"{bias} "
         "Return ONLY a JSON array of objects with keys: title (str), description (one line), search_query (short search for this dish). "
         'Example: [{"title":"Chicken Katsu Curry","description":"Crispy panko chicken with Japanese curry sauce","search_query":"chicken katsu curry recipe"}]'
     )
