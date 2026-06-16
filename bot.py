@@ -1809,7 +1809,6 @@ async def members(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _handle_user_text(update, context, user_id, text):
     """Core text processing logic used by both handle_text and handle_voice."""
-    user_id = _effective_user_id(user_id)
     pantry = db.get_pantry_names(user_id)
     recipes = db.get_recipes(user_id)
 
@@ -1932,27 +1931,30 @@ async def _handle_user_text(update, context, user_id, text):
     reply = result.get("message", "")
 
     if action == "add":
+        eff_id = _effective_user_id(user_id)
         expiry = _parse_expiry(result.get("expiry_date", ""))
-        db.add_pantry_items(user_id, items, expiry=expiry)
-        pantry_items = db.get_pantry(user_id)
+        db.add_pantry_items(eff_id, items, expiry=expiry)
+        pantry_items = db.get_pantry(eff_id)
         names = [i["name"] for i in pantry_items]
         cat_map = ai.categorize_pantry_items(names)
         if cat_map:
-            db.recategorize_by_map(user_id, cat_map)
+            db.recategorize_by_map(eff_id, cat_map)
         await msg.edit_text("Added and sorted!")
 
     elif action == "remove":
+        eff_id = _effective_user_id(user_id)
         for item in items:
-            db.remove_pantry_item(user_id, item)
+            db.remove_pantry_item(eff_id, item)
         await msg.edit_text(reply)
 
     elif action == "clear_pantry":
+        eff_id = _effective_user_id(user_id)
         for item in pantry:
-            db.remove_pantry_item(user_id, item)
+            db.remove_pantry_item(eff_id, item)
         await msg.edit_text("Pantry cleared!")
 
     elif action == "list_pantry":
-        groups = db.get_pantry_grouped(user_id)
+        groups = db.get_pantry_grouped(_effective_user_id(user_id))
         if not groups:
             await msg.edit_text("Your pantry is empty. Tell me what to add!")
             return
@@ -1966,7 +1968,7 @@ async def _handle_user_text(update, context, user_id, text):
             await msg.edit_text("Tell me what to remember. Example: I have an air fryer")
 
     elif action == "expiring":
-        ex = db.get_expiring_items(user_id)
+        ex = db.get_expiring_items(_effective_user_id(user_id))
         if not ex:
             await msg.edit_text("Nothing expiring soon!")
             return
