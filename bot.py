@@ -2513,6 +2513,13 @@ async def receipt_confirm_callback(update: Update, context: ContextTypes.DEFAULT
     await query.edit_message_text(f"\u2705 Added {len(added)} item(s) to pantry: {', '.join(added)}")
 
 
+async def random_ingredient(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    _check_ai_limit(update.effective_user.id)
+    msg = await update.message.reply_text("Thinking...")
+    result = ai.suggest_random_ingredient()
+    await msg.edit_text(result)
+
+
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Update {update} caused error {context.error}")
     if update and update.effective_message:
@@ -2571,6 +2578,7 @@ def create_app(token: str):
     app.add_handler(CommandHandler("export", export_recipe))
     app.add_handler(CommandHandler("import", import_recipe))
     app.add_handler(CommandHandler("batch", batch_start))
+    app.add_handler(CommandHandler("random", random_ingredient))
     app.add_handler(CommandHandler("cookmode", cookmode))
     app.add_handler(CommandHandler("cook", cookmode))  # alias
     app.add_handler(CallbackQueryHandler(elaborate_callback, pattern="^elaborate_[0-4]$"))

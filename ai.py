@@ -980,3 +980,28 @@ def parse_cook_recipe(recipe_text):
         "ingredients": ingredients,
         "steps": steps,
     }
+
+
+def suggest_random_ingredient():
+    prompt = (
+        "Suggest a single random, unusual, quirky ingredient available in Singapore. "
+        "Think outside the box — unusual produce, specialty sauces, interesting spices, "
+        "unique pantry items, artisanal products. Be creative but keep it real and findable "
+        "(NTUC FairPrice, Cold Storage, wet markets, Mustafa Centre, RedMart, Little Farms, etc.). "
+        "Return ONLY the ingredient info in exactly this format — no extra commentary:\n\n"
+        "**🛒 Ingredient:** name\n\n"
+        "**📖 What It Is:** brief description\n\n"
+        "**📍 Where to Find It (Singapore):** specific store/market names\n\n"
+        "**🍳 How to Use It:** cooking ideas and dishes it elevates\n\n"
+        "**🔬 The Science Behind It:** interesting food science fact\n\n"
+        "Pick a different category each time (not always sauces or spices). Vary it."
+    )
+    try:
+        return _groq_call(
+            prompt,
+            "You are a creative food explorer suggesting unique ingredients. Be surprising and educational.",
+            model=GROQ_QUALITY_MODEL, temperature=0.9, max_tokens=800,
+        ) or "AI error"
+    except Exception as e:
+        logger.exception("suggest_random_ingredient failed")
+        return f"AI error: {e}"
