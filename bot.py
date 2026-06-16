@@ -377,12 +377,12 @@ async def set_pref(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     key = args[0].lower()
     value = " ".join(args[1:])
-    db.set_user_preference(update.effective_user.id, key, value)
+    db.set_user_preference(_effective_user_id(update.effective_user.id), key, value)
     await update.message.reply_text(f"Saved your {key}: {value}")
 
 
 async def equipment(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+    user_id = _effective_user_id(update.effective_user.id)
     args = context.args
     if args:
         value = " ".join(args)
@@ -419,7 +419,7 @@ async def diet(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def export_recipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+    user_id = _effective_user_id(update.effective_user.id)
     args = context.args
 
     if args:
@@ -571,7 +571,7 @@ async def send_monthly_reminders(token):
 # --- Recipes ---
 
 async def suggest(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+    user_id = _effective_user_id(update.effective_user.id)
     _check_ai_limit(user_id)
     pantry = db.get_pantry_names(user_id)
     pref = " ".join(context.args) if context.args else ""
@@ -579,7 +579,7 @@ async def suggest(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def improvise(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+    user_id = _effective_user_id(update.effective_user.id)
     _check_ai_limit(user_id)
     expiring = db.get_expiring_items(user_id, 30)
     if not expiring:
@@ -754,10 +754,12 @@ async def _elaborate_dish(update, context, user_id, text, dish_index, pantry_ite
 async def suggest_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    user_id = query.from_user.id
+    user_id = _effective_user_id(query.from_user.id)
 
     if query.data == "save_last":
         text = _last_suggestion.get(user_id, "")
+        if not text:
+            text = _last_suggestion.get(query.from_user.id, "")
         if not text:
             await query.edit_message_text("No suggestion to save. Run /suggest first.")
             return
@@ -782,6 +784,8 @@ async def suggest_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "export_last":
         import tempfile
         text = _last_suggestion.get(user_id, "")
+        if not text:
+            text = _last_suggestion.get(query.from_user.id, "")
         if not text:
             await query.message.reply_text("No recipe to export. Run /suggest first.")
             return
@@ -835,7 +839,7 @@ async def suggest_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def elaborate_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    user_id = query.from_user.id
+    user_id = _effective_user_id(query.from_user.id)
     dish_index = int(query.data.split("_")[1])
     pantry = db.get_pantry_names(user_id)
     await _elaborate_dish(update, context, user_id, "", dish_index, pantry)
@@ -1160,10 +1164,10 @@ async def cook_from_recipe_callback(update: Update, context: ContextTypes.DEFAUL
 
 
 async def save_recipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+    user_id = _effective_user_id(update.effective_user.id)
     _check_ai_limit(user_id)
     args = context.args
-    text = _last_suggestion.get(user_id, "")
+    text = _last_suggestion.get(update.effective_user.id) or _last_suggestion.get(user_id, "")
 
     if text:
         parsed = ai.parse_recipe_text(text)
@@ -1206,7 +1210,7 @@ async def save_recipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def list_recipes(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    recipes = db.get_recipes(update.effective_user.id)
+    recipes = db.get_recipes(_effective_user_id(update.effective_user.id))
     if not recipes:
         await update.message.reply_text("No saved recipes. Try `/suggest` to get some!", parse_mode="Markdown")
         return
@@ -1245,7 +1249,7 @@ async def view_recipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not args:
         await update.message.reply_text("Usage: `/view <number>` or `/view <title>`", parse_mode="Markdown")
         return
-    user_id = update.effective_user.id
+    user_id = _effective_user_id(update.effective_user.id)
     query_str = " ".join(args)
 
     recipe = None
@@ -1262,9 +1266,9 @@ async def view_recipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     text = _format_recipe(recipe)
-    _last_suggestion[update.effective_user.id] = text
-    _is_saved_recipe[update.effective_user.id] = True
-    _pending_cooked[update.effective_user.id] = recipe["title"]
+    _last_suggestion[user_id] = text
+    _is_saved_recipe[user_id] = True
+    _pending_cooked[user_id] = recipe["title"]
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("👨‍🍳 Cook Mode", callback_data="cook_recipe"),
          InlineKeyboardButton("📤 Export", callback_data="export_last"),
@@ -1279,7 +1283,7 @@ async def delete_recipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not args or not args[0].isdigit():
         await update.message.reply_text("Usage: `/delete <id>`", parse_mode="Markdown")
         return
-    db.delete_recipe(update.effective_user.id, int(args[0]))
+    db.delete_recipe(_effective_user_id(update.effective_user.id), int(args[0]))
     await update.message.reply_text(f"🗑️ Deleted recipe #{args[0]}")
 
 
@@ -1287,7 +1291,7 @@ async def delete_recipe_callback(update: Update, context: ContextTypes.DEFAULT_T
     query = update.callback_query
     await query.answer()
     recipe_id = int(query.data.split("_")[1])
-    user_id = query.from_user.id
+    user_id = _effective_user_id(query.from_user.id)
     db.delete_recipe(user_id, recipe_id)
     # Refresh with sequential numbering
     recipes = db.get_recipes(user_id)
@@ -1302,7 +1306,7 @@ async def view_recipe_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     query = update.callback_query
     await query.answer()
     recipe_id = int(query.data.split("_")[1])
-    user_id = query.from_user.id
+    user_id = _effective_user_id(query.from_user.id)
     recipe = db.get_recipe(user_id, recipe_id)
     if recipe:
         text = _format_recipe(recipe)
@@ -1321,7 +1325,7 @@ async def view_recipe_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def import_recipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+    user_id = _effective_user_id(update.effective_user.id)
     _check_ai_limit(user_id)
     url = " ".join(context.args).strip()
     if not url:
@@ -1492,7 +1496,7 @@ async def stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def canbake(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+    user_id = _effective_user_id(update.effective_user.id)
     _check_ai_limit(user_id)
     pantry = db.get_pantry_names(user_id)
     if not pantry:
@@ -1809,13 +1813,15 @@ async def members(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _handle_user_text(update, context, user_id, text):
     """Core text processing logic used by both handle_text and handle_voice."""
+    raw_user_id = user_id  # keep original for personal-only state
+    user_id = _effective_user_id(user_id)
     pantry = db.get_pantry_names(user_id)
     recipes = db.get_recipes(user_id)
 
     # Check batch state first (before dish selection, to avoid conflicts)
-    state = _batch_state.get(user_id)
+    state = _batch_state.get(raw_user_id)
     if state and state["count"] == 0:
-        count = await batch_handle_count(user_id, text)
+        count = await batch_handle_count(raw_user_id, text)
         if count:
             state["count"] = count
             await update.effective_message.reply_text(f"Great! {count} dishes. What cuisine?")
@@ -1826,9 +1832,9 @@ async def _handle_user_text(update, context, user_id, text):
     if state and state["count"] > 0 and not state["cuisine"]:
         state["cuisine"] = text.strip()
         await update.effective_message.reply_text(f"{state['cuisine'].title()} sounds good! Generating suggestions...")
-        menu = _batch_generate_menu(user_id)
+        menu = _batch_generate_menu(raw_user_id)
         if menu:
-            await batch_show_menu(update, context, user_id)
+            await batch_show_menu(update, context, raw_user_id)
         else:
             await update.effective_message.reply_text("Could not generate suggestions. Try a different cuisine.")
             state["cuisine"] = ""
@@ -1867,7 +1873,7 @@ async def _handle_user_text(update, context, user_id, text):
             _last_suggestion[user_id] = result
             _is_saved_recipe[user_id] = False
             mid = result.replace("**", "").replace("*", "").strip()
-            _pending_cooked[user_id] = mid.split("\n")[0] if mid else "Recipe"
+            _pending_cooked[raw_user_id] = mid.split("\n")[0] if mid else "Recipe"
             sanitized = _sanitize_markdown(result)
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("💾 Save Recipe", callback_data="save_last"),
@@ -1896,7 +1902,7 @@ async def _handle_user_text(update, context, user_id, text):
             _last_suggestion[user_id] = result
             _is_saved_recipe[user_id] = False
             mid = result.replace("**", "").replace("*", "").strip()
-            _pending_cooked[user_id] = mid.split("\n")[0] if mid else "Recipe"
+            _pending_cooked[raw_user_id] = mid.split("\n")[0] if mid else "Recipe"
             sanitized = _sanitize_markdown(result)
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("💾 Save Recipe", callback_data="save_last"),
@@ -1949,7 +1955,8 @@ async def _handle_user_text(update, context, user_id, text):
 
     elif action == "clear_pantry":
         eff_id = _effective_user_id(user_id)
-        for item in pantry:
+        shared_pantry = db.get_pantry_names(eff_id)
+        for item in shared_pantry:
             db.remove_pantry_item(eff_id, item)
         await msg.edit_text("Pantry cleared!")
 
@@ -2086,7 +2093,7 @@ async def _handle_user_text(update, context, user_id, text):
             text = _format_recipe(recipe)
             _last_suggestion[user_id] = text
             _is_saved_recipe[user_id] = True
-            _pending_cooked[user_id] = recipe["title"]
+            _pending_cooked[raw_user_id] = recipe["title"]
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("👨‍🍳 Cook Mode", callback_data="cook_recipe"),
                  InlineKeyboardButton("📤 Export", callback_data="export_last"),
