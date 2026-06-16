@@ -1027,7 +1027,8 @@ async def batch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = InlineKeyboardMarkup(
             dish_buttons + [[InlineKeyboardButton("📤 Export", callback_data="export_last")]]
         )
-        await query.edit_message_text(sanitized, parse_mode="Markdown", reply_markup=keyboard)
+        msg = await query.message.reply_text("Generating batch plan...")
+        await _send_long_message(None, msg, sanitized, keyboard)
 
     elif data.startswith("batch_toggle_"):
         idx = int(data.split("_")[2])
@@ -1058,13 +1059,6 @@ async def cookmode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ingredients = parsed["ingredients"]
     steps = parsed["steps"]
 
-    # Show title + ingredients with Next button
-    lines = [f"**Cooking Mode: {title}**", "", "**Ingredients**"]
-    for ing in ingredients:
-        lines.append(f"- {ing}")
-    lines.append("")
-    lines.append(f"*{len(steps)} steps total*")
-
     _cook_state[user_id] = {
         "title": title,
         "ingredients": ingredients,
@@ -1073,9 +1067,27 @@ async def cookmode(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "msg_id": None,
     }
 
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("Next Step", callback_data="cook_next")],
-    ])
+    # Show title + ingredients + first batch of steps
+    lines = [f"**Cooking Mode: {title}**", "", "**Ingredients**"]
+    for ing in ingredients:
+        lines.append(f"- {ing}")
+    lines.append("")
+    lines.append(f"*{len(steps)} steps total*")
+
+    shown_now = min(3, len(steps))
+    for i in range(shown_now):
+        lines.append(f"{i+1}. {steps[i]}")
+    _cook_state[user_id]["shown"] = shown_now
+
+    remaining = len(steps) - shown_now
+    if remaining <= 0:
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Done", callback_data="cook_done")],
+        ])
+    else:
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Next Step", callback_data="cook_next")],
+        ])
     text = "\n".join(lines)
     msg = await update.message.reply_text(text, parse_mode="Markdown", reply_markup=keyboard)
     _cook_state[user_id]["msg_id"] = msg.message_id
@@ -1096,14 +1108,9 @@ async def cook_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     remaining = len(steps) - shown
     batch = min(3, remaining)
 
-    # Build the full message: title + ingredients + steps shown so far + new batch
-    lines = [f"**Cooking Mode: {state['title']}**", "", "**Ingredients**"]
-    for ing in state["ingredients"]:
-        lines.append(f"- {ing}")
-    lines.append("")
-
-    # All steps revealed so far (ingredients always shown)
-    for i in range(shown + batch):
+    # Each batch is sent as a separate message (avoids growing past 4096)
+    lines = []
+    for i in range(shown, shown + batch):
         lines.append(f"{i+1}. {steps[i]}")
 
     state["shown"] += batch
@@ -1118,11 +1125,7 @@ async def cook_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("Next Step", callback_data="cook_next")],
         ])
 
-    try:
-        await query.edit_message_text("\n".join(lines), parse_mode="Markdown", reply_markup=keyboard)
-    except Exception:
-        logger.exception("Failed to edit recipe callback message")
-        pass
+    await query.message.reply_text("\n".join(lines), parse_mode="Markdown", reply_markup=keyboard)
 
 
 async def cook_done_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1149,9 +1152,9 @@ async def cook_done_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
                  InlineKeyboardButton("✅ Cooked!", callback_data="cooked")],
             ])
         sanitized = _sanitize_markdown(recipe_text)
-        await query.edit_message_text(sanitized, parse_mode="Markdown", reply_markup=keyboard)
+        await query.message.reply_text(sanitized, parse_mode="Markdown", reply_markup=keyboard)
     else:
-        await query.edit_message_text("Happy cooking! 🍳")
+        await query.message.reply_text("Happy cooking! 🍳")
 
 
 async def cook_from_recipe_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1246,7 +1249,7 @@ async def list_recipes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("No saved recipes. Try `/suggest` to get some!", parse_mode="Markdown")
         return
     text, markup = _build_recipe_list(recipes)
-    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=markup)
+    await _reply_chunked(update.message, text, parse_mode="Markdown", reply_markup=markup)
 
 
 def _build_recipe_list(recipes):
@@ -1349,9 +1352,10 @@ async def delete_recipe_callback(update: Update, context: ContextTypes.DEFAULT_T
     recipes = db.get_recipes(user_id)
     if recipes:
         text, markup = _build_recipe_list(recipes)
-        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=markup)
+        busy = await query.message.reply_text("Refreshing list...")
+        await _send_long_message(None, busy, text, markup)
     else:
-        await query.edit_message_text("No saved recipes. Try `/suggest` to get some!", parse_mode="Markdown")
+        await query.message.reply_text("No saved recipes. Try `/suggest` to get some!", parse_mode="Markdown")
 
 
 async def view_recipe_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1988,7 +1992,7 @@ async def _handle_user_text(update, context, user_id, text):
                 [InlineKeyboardButton("📤 Export", callback_data="export_last"),
                  InlineKeyboardButton("✅ Cooked!", callback_data="cooked")],
             ])
-            await msg.edit_text(sanitized, parse_mode="Markdown", reply_markup=keyboard)
+            await _send_long_message(None, msg, sanitized, keyboard)
             return
 
         scale_match = re.search(r"(?:for|serve)\s*(\d+)\s*(?:people|person|servings|pax)", t, re.I)
@@ -2017,7 +2021,7 @@ async def _handle_user_text(update, context, user_id, text):
                 [InlineKeyboardButton("📤 Export", callback_data="export_last"),
                  InlineKeyboardButton("✅ Cooked!", callback_data="cooked")],
             ])
-            await msg.edit_text(sanitized, parse_mode="Markdown", reply_markup=keyboard)
+            await _send_long_message(None, msg, sanitized, keyboard)
             return
 
     # Recipe follow-up: if user is asking a question about the current recipe
@@ -2206,7 +2210,9 @@ async def _handle_user_text(update, context, user_id, text):
                  InlineKeyboardButton("📤 Export", callback_data="export_last"),
                  InlineKeyboardButton("✅ Cooked!", callback_data="cooked")],
             ])
-            await update.effective_message.reply_text(text, parse_mode="Markdown", reply_markup=keyboard)
+            busy = await update.effective_message.reply_text("Fetching recipe...")
+            sanitized = _sanitize_markdown(text)
+            await _send_long_message(None, busy, sanitized, keyboard)
         else:
             await update.effective_message.reply_text(
                 "Recipe not found. Say 'show my recipes' to see your saved recipes."
