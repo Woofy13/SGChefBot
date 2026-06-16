@@ -248,12 +248,12 @@ def generate_menu(pantry_items, preferences="", diversity_hint=""):
         "Feel free to ignore the pantry entirely. "
         "Only suggest real, well-known dishes. "
         f"{bias} "
-        "Return ONLY a JSON array of objects with keys: title (str), description (one line), search_query (short search for this dish). "
+        "Return ONLY a JSON array of objects with keys: title (str), description (max 8 words, one line), search_query (short search for this dish). "
         'Example: [{"title":"Chicken Katsu Curry","description":"Crispy panko chicken with Japanese curry sauce","search_query":"chicken katsu curry recipe"}]'
     )
 
     try:
-        text = _gemini_call(prompt, CHEF_JSON_SYSTEM, temperature=0.5, max_tokens=800)
+        text = _gemini_call(prompt, CHEF_JSON_SYSTEM, temperature=0.5, max_tokens=1500)
         if not text:
             return None
         return _extract_json_array(text)
@@ -313,7 +313,7 @@ def suggest_recipe(pantry_items, preferences=""):
         "\nSuggest exactly 5 dishes the user can cook RIGHT NOW using ONLY the pantry ingredients "
         "plus common staples. If the dish needs an ingredient not in the pantry, mark it with [BUY] "
         "in the description.\n"
-        "Return ONLY a JSON array of objects with keys: title (str), description (one line with [BUY] markers), "
+        "Return ONLY a JSON array of objects with keys: title (str), description (max 8 words, one line, mark needed items [BUY]), "
         "search_query (short search for this dish).\n"
         'Example: [{"title":"Chicken Soup","description":"Hearty soup [BUY:chicken]","search_query":"chicken soup recipe"}]'
     )
