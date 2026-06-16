@@ -1065,6 +1065,7 @@ async def cookmode(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "steps": steps,
         "shown": 0,
         "msg_id": None,
+        "overflow": False,
     }
 
     # Show title + ingredients + first batch of steps
@@ -1107,14 +1108,33 @@ async def cook_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     shown = state["shown"]
     remaining = len(steps) - shown
     batch = min(3, remaining)
+    new_shown = shown + batch
 
-    # Each batch is sent as a separate message (avoids growing past 4096)
-    lines = []
-    for i in range(shown, shown + batch):
+    if state.get("overflow"):
+        # Already hit the limit — send each batch as new step-only message
+        step_lines = []
+        for i in range(shown, new_shown):
+            step_lines.append(f"{i+1}. {steps[i]}")
+        state["shown"] = new_shown
+        remaining = len(steps) - new_shown
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Done", callback_data="cook_done")],
+        ]) if remaining <= 0 else InlineKeyboardMarkup([
+            [InlineKeyboardButton("Next Step", callback_data="cook_next")],
+        ])
+        await query.message.reply_text("\n".join(step_lines), parse_mode="Markdown", reply_markup=keyboard)
+        return
+
+    # Build accumulating message: title + ingredients + all steps so far
+    lines = [f"**Cooking Mode: {state['title']}**", "", "**Ingredients**"]
+    for ing in state["ingredients"]:
+        lines.append(f"- {ing}")
+    lines.append("")
+    for i in range(new_shown):
         lines.append(f"{i+1}. {steps[i]}")
 
-    state["shown"] += batch
-    remaining = len(steps) - state["shown"]
+    state["shown"] = new_shown
+    remaining = len(steps) - new_shown
 
     if remaining <= 0:
         keyboard = InlineKeyboardMarkup([
@@ -1125,7 +1145,16 @@ async def cook_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("Next Step", callback_data="cook_next")],
         ])
 
-    await query.message.reply_text("\n".join(lines), parse_mode="Markdown", reply_markup=keyboard)
+    full_text = "\n".join(lines)
+    if len(full_text) <= MAX_MSG_LEN - 200:
+        await query.edit_message_text(full_text, parse_mode="Markdown", reply_markup=keyboard)
+    else:
+        # Message too long — spill current batch as new step-only message
+        state["overflow"] = True
+        step_lines = []
+        for i in range(shown, new_shown):
+            step_lines.append(f"{i+1}. {steps[i]}")
+        await query.message.reply_text("\n".join(step_lines), parse_mode="Markdown", reply_markup=keyboard)
 
 
 async def cook_done_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1176,23 +1205,35 @@ async def cook_from_recipe_callback(update: Update, context: ContextTypes.DEFAUL
     ingredients = parsed["ingredients"]
     steps = parsed["steps"]
 
-    lines = [f"**Cooking Mode: {title}**", "", "**Ingredients**"]
-    for ing in ingredients:
-        lines.append(f"- {ing}")
-    lines.append("")
-    lines.append(f"*{len(steps)} steps total*")
-
     _cook_state[user_id] = {
         "title": title,
         "ingredients": ingredients,
         "steps": steps,
         "shown": 0,
         "msg_id": None,
+        "overflow": False,
     }
 
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("Next Step", callback_data="cook_next")],
-    ])
+    lines = [f"**Cooking Mode: {title}**", "", "**Ingredients**"]
+    for ing in ingredients:
+        lines.append(f"- {ing}")
+    lines.append("")
+    lines.append(f"*{len(steps)} steps total*")
+
+    shown_now = min(3, len(steps))
+    for i in range(shown_now):
+        lines.append(f"{i+1}. {steps[i]}")
+    _cook_state[user_id]["shown"] = shown_now
+
+    remaining = len(steps) - shown_now
+    if remaining <= 0:
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Done", callback_data="cook_done")],
+        ])
+    else:
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Next Step", callback_data="cook_next")],
+        ])
     msg = await query.edit_message_text("\n".join(lines), parse_mode="Markdown", reply_markup=keyboard)
     _cook_state[user_id]["msg_id"] = msg.message_id
 
