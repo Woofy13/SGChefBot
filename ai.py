@@ -983,9 +983,16 @@ def parse_cook_recipe(recipe_text):
 
 
 def suggest_random_ingredient(country=""):
+    reality_check = (
+        "CRITICAL: Only suggest ingredients that are 100% real and verifiable. "
+        "Never invent or hallucinate ingredients. If you are unsure whether something exists, do not suggest it. "
+        "Stick to well-known real ingredients like gochujang, sumac, yuzu kosho, harissa, black garlic, "
+        "kecap manis, shrimp paste, miso, preserved lemon, za'atar, fish sauce, furikake, etc. "
+    )
     if country:
         prompt = (
             f"Suggest a single random, unusual ingredient or food item from {country} cuisine. "
+            f"{reality_check}"
             "It should be authentic, interesting, and something a home cook might not have tried before. "
             "Think beyond the obvious — unique spices, fermented items, specialty produce, sauces, condiments, etc. "
             f"Mention where to find it in Singapore (NTUC FairPrice, Cold Storage, Mustafa Centre, "
@@ -1001,6 +1008,7 @@ def suggest_random_ingredient(country=""):
     else:
         prompt = (
             "Suggest a single random, unusual, quirky ingredient available in Singapore. "
+            f"{reality_check}"
             "Think outside the box — unusual produce, specialty sauces, interesting spices, "
             "unique pantry items, artisanal products. Be creative but keep it real and findable "
             "(NTUC FairPrice, Cold Storage, wet markets, Mustafa Centre, RedMart, Little Farms, etc.). "
@@ -1013,9 +1021,11 @@ def suggest_random_ingredient(country=""):
             "Pick a different category each time (not always sauces or spices). Vary it."
         )
     system = (
-        f"You are a creative food explorer suggesting unique ingredients. Be surprising and educational."
+        "You are a creative food explorer suggesting unique ingredients. Be surprising and educational. "
+        "Never make up ingredients."
         if not country else
-        f"You are a culinary expert in {country} cuisine. Be authentic, surprising, and educational."
+        f"You are a culinary expert in {country} cuisine. Be authentic, surprising, and educational. "
+        "Never make up ingredients."
     )
     try:
         return _groq_call(
