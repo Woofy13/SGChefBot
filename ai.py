@@ -129,7 +129,7 @@ def _groq_call(prompt, system_msg, model=None, temperature=0.5, max_tokens=600):
             _daily_count += 1
             text = resp.choices[0].message.content
             # Strip  tags (model internal reasoning)
-            text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
+            text = re.sub(r'<think>.*?(</think>|$)', '', text, flags=re.DOTALL).strip()
             return text
 
         except RateLimitError as e:
