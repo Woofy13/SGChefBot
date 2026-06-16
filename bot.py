@@ -46,6 +46,9 @@ _pending_cooked = {}  # user_id -> dish_name (str) or list of dish names (batch)
 # Batch export state
 _batch_export = {}  # user_id -> {"step": "awaiting_input"}
 
+# Random ingredient country tracker
+_random_country = {}  # user_id -> country string
+
 # Photo tracking
 _photo_counts = {}  # user_id -> date
 PHOTO_DAILY_LIMIT = 30
@@ -2515,10 +2518,29 @@ async def receipt_confirm_callback(update: Update, context: ContextTypes.DEFAULT
 
 async def random_ingredient(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _check_ai_limit(update.effective_user.id)
+    user_id = update.effective_user.id
     country = " ".join(context.args).strip() if context.args else ""
+    _random_country[user_id] = country
     msg = await update.message.reply_text("Thinking..." if not country else f"Finding a {country} ingredient...")
     result = ai.suggest_random_ingredient(country)
-    await msg.edit_text(result)
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 Regenerate", callback_data="random_regenerate")],
+    ])
+    sanitized = _sanitize_markdown(result)
+    await msg.edit_text(sanitized, parse_mode="Markdown", reply_markup=keyboard)
+
+
+async def random_regenerate_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    country = _random_country.get(user_id, "")
+    result = ai.suggest_random_ingredient(country)
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 Regenerate", callback_data="random_regenerate")],
+    ])
+    sanitized = _sanitize_markdown(result)
+    await query.edit_message_text(sanitized, parse_mode="Markdown", reply_markup=keyboard)
 
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2592,6 +2614,7 @@ def create_app(token: str):
     app.add_handler(CallbackQueryHandler(cook_done_callback, pattern="^cook_done$"))
     app.add_handler(CallbackQueryHandler(cook_from_recipe_callback, pattern="^cook_recipe$"))
     app.add_handler(CallbackQueryHandler(export_batch_callback, pattern="^export_batch$"))
+    app.add_handler(CallbackQueryHandler(random_regenerate_callback, pattern="^random_regenerate$"))
     app.add_handler(CallbackQueryHandler(delete_recipe_callback, pattern="^delrecipe_"))
     app.add_handler(CallbackQueryHandler(view_recipe_callback, pattern="^viewrecipe_"))
     app.add_handler(CallbackQueryHandler(shop_callback, pattern="^shop_"))
