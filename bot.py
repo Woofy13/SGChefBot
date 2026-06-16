@@ -1189,7 +1189,7 @@ async def cook_done_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             except Exception:
                 pass
         # Fall back to new message if editing fails (too long or other error)
-        await query.message.reply_text(sanitized, parse_mode="Markdown", reply_markup=keyboard)
+        await _reply_chunked(query.message, sanitized, parse_mode="Markdown", reply_markup=keyboard)
     else:
         await query.edit_message_text("Happy cooking! 🍳")
 
