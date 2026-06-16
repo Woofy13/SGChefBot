@@ -1181,9 +1181,17 @@ async def cook_done_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
                  InlineKeyboardButton("✅ Cooked!", callback_data="cooked")],
             ])
         sanitized = _sanitize_markdown(recipe_text)
+        # Try to edit the last step message in place (no extra message)
+        if len(sanitized) <= MAX_MSG_LEN:
+            try:
+                await query.edit_message_text(sanitized, parse_mode="Markdown", reply_markup=keyboard)
+                return
+            except Exception:
+                pass
+        # Fall back to new message if editing fails (too long or other error)
         await query.message.reply_text(sanitized, parse_mode="Markdown", reply_markup=keyboard)
     else:
-        await query.message.reply_text("Happy cooking! 🍳")
+        await query.edit_message_text("Happy cooking! 🍳")
 
 
 async def cook_from_recipe_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
