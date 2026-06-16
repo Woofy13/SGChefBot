@@ -1,5 +1,6 @@
 import logging
 logging.getLogger("duckduckgo_search").setLevel(logging.WARNING)
+logging.getLogger("ddgs").setLevel(logging.WARNING)
 logging.getLogger("primp").setLevel(logging.WARNING)
 import base64
 import os

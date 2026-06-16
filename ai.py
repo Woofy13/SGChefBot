@@ -199,7 +199,7 @@ def search_web(query, max_results=5, sites=None):
         if sites:
             site_filter = " OR ".join(sites)
             search_q = f"({site_filter}) {search_q}"
-        with DDGS() as ddgs:
+        with DDGS(timeout=5) as ddgs:
             results = ddgs.text(search_q, max_results=max_results)
             snippets = []
             for r in results:
