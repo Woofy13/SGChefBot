@@ -57,7 +57,7 @@ MAX_PHOTO_SIZE = 10 * 1024 * 1024  # 10MB
 # Per-user AI call tracking
 _ai_counts = {}  # user_id -> count per day
 _ai_count_date = date.today()
-AI_DAILY_LIMIT = 5000
+AI_DAILY_LIMIT = 1500
 
 
 def _check_ai_limit(user_id):

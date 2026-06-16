@@ -6,24 +6,30 @@ import logging
 import html
 import html.parser
 from datetime import date
-from openai import OpenAI, RateLimitError
+from openai import OpenAI
 from ddgs import DDGS
-from config import GROQ_API_KEY, GROQ_BASE_URL, GROQ_MODEL, GROQ_QUALITY_MODEL, GROQ_VISION_MODEL, OWNER_TELEGRAM_ID
+from config import GEMINI_API_KEY, GEMINI_MODEL, OWNER_TELEGRAM_ID
+import google.genai as genai
 
-client = OpenAI(api_key=GROQ_API_KEY, base_url=GROQ_BASE_URL, max_retries=0)
+client = OpenAI(
+    api_key=GEMINI_API_KEY,
+    base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+    max_retries=0,
+)
+genai_client = genai.Client(api_key=GEMINI_API_KEY)
 
 logger = logging.getLogger(__name__)
 
 # Global daily request tracking
 _daily_count = 0
 _daily_date = date.today()
-DAILY_LIMIT = 14000  # safe margin below 14,400
-WARN_AT = 13000
+DAILY_LIMIT = 1500
+WARN_AT = 1400
 
 # Per-user daily request tracking
 _user_daily_count = {}
 _user_daily_date = date.today()
-USER_DAILY_LIMIT = 5000
+USER_DAILY_LIMIT = 1500
 
 
 def check_daily_limit(user_id):
@@ -37,7 +43,52 @@ def check_daily_limit(user_id):
     _user_daily_count.setdefault(user_id, 0)
     _user_daily_count[user_id] += 1
     if _user_daily_count[user_id] > USER_DAILY_LIMIT:
-        raise RuntimeError("You've reached your daily request limit (5,000). Try again tomorrow.")
+        raise RuntimeError("You've reached your daily request limit (1,500). Try again tomorrow.")
+
+
+def _gemini_call(prompt, system_msg, temperature=0.5, max_tokens=600):
+    global _daily_count, _daily_date
+
+    today = date.today()
+    if today != _daily_date:
+        _daily_count = 0
+        _daily_date = today
+
+    if _daily_count >= DAILY_LIMIT:
+        raise RuntimeError("Gemini daily request limit reached (~1,500). Try again after midnight UTC.")
+
+    msg = [{"role": "system", "content": system_msg}, {"role": "user", "content": prompt}]
+
+    for attempt in range(3):
+        try:
+            resp = client.chat.completions.create(
+                model=GEMINI_MODEL,
+                messages=msg,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            _daily_count += 1
+            text = resp.choices[0].message.content
+            text = re.sub(r'<think>.*?(</think>|$)', '', text, flags=re.DOTALL).strip()
+            return text
+        except Exception as e:
+            err_str = str(e)
+            if "429" in err_str or "Too Many Requests" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+                if attempt < 2:
+                    time.sleep(5)
+                    continue
+                raise RuntimeError("Gemini daily request limit reached (~1,500). Try again after midnight UTC.")
+            raise
+    return None
+
+
+CHEF_PERSONA = (
+    "You are my AI Expert Chef Assistant. Think and respond like a professional chef, "
+    "not a cookbook. You analyze ingredients, techniques, and interactions like a culinary scientist. "
+    "Reference modern techniques (like in The Flavor Bible, Salt Fat Acid Heat, or Modernist Cuisine). "
+    "Prioritize ingredient synergy, cooking science, and accessibility. "
+    "Make sure recipes are concise, without leaving out important steps."
+)
 
 COMMON_STAPLES = "salt, pepper, sugar, cooking oil, soy sauce, garlic, onion, ginger, eggs, rice, cooking wine, cornstarch, chilli sauce"
 
@@ -100,62 +151,7 @@ Key things to get right. No emojis in body text.
 IMPORTANT: Only put emojis in section headings. Never add emojis to ingredient lines, step numbers, or body text."""
 
 
-def _groq_call(prompt, system_msg, model=None, temperature=0.5, max_tokens=600):
-    global _daily_count, _daily_date
-
-    # Reset counter at midnight
-    today = date.today()
-    if today != _daily_date:
-        _daily_count = 0
-        _daily_date = today
-
-    # Warn if near daily limit
-    if _daily_count >= DAILY_LIMIT:
-        raise RuntimeError("Daily Groq request limit reached (~14,000). Try again after midnight UTC, or use a different model.")
-
-    msg = [{"role": "system", "content": system_msg}, {"role": "user", "content": prompt}]
-    # Default to high-RPD model (14,400 req/day) for volume tasks.
-    # Quality tasks pass model=GROQ_QUALITY_MODEL explicitly.
-    used_model = model or "llama-3.1-8b-instant"
-
-    for attempt in range(3):
-        try:
-            resp = client.chat.completions.create(
-                model=used_model,
-                messages=msg,
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
-            _daily_count += 1
-            text = resp.choices[0].message.content
-            # Strip  tags (model internal reasoning)
-            text = re.sub(r'<think>.*?(</think>|$)', '', text, flags=re.DOTALL).strip()
-            return text
-
-        except RateLimitError as e:
-            # Check if it's a daily limit (remaining == 0) or per-minute
-            remaining = None
-            reset_after = None
-            try:
-                remaining = int(e.response.headers.get("x-ratelimit-remaining-requests", -1))
-                reset_after = e.response.headers.get("retry-after", None)
-            except Exception:
-                pass
-
-            if remaining == 0:
-                raise RuntimeError(
-                    "Groq daily request limit exhausted. "
-                    "Resets at midnight UTC. "
-                    "Try again tomorrow, or use `llama-3.1-8b-instant` which has 14,400 RPD."
-                )
-
-            if attempt < 2:
-                sleep_time = int(reset_after) if reset_after and int(reset_after) <= 10 else 5
-                time.sleep(sleep_time)
-                continue
-            raise
-    return None
-
+# --- Web Search ---
 
 def search_web(query, max_results=5, sites=None):
     try:
@@ -181,6 +177,8 @@ def detect_cuisine(query):
             return sites if sites else ALL_SITES
     return ALL_SITES
 
+
+# --- Menu Generation ---
 
 def generate_menu(pantry_items, preferences="", diversity_hint=""):
     items_str = ", ".join(pantry_items) if pantry_items else ""
@@ -213,7 +211,7 @@ def generate_menu(pantry_items, preferences="", diversity_hint=""):
     )
 
     try:
-        text = _groq_call(prompt, "You are a chef. Return ONLY a JSON array.", temperature=0.5, max_tokens=600)
+        text = _gemini_call(prompt, CHEF_PERSONA + "\n\n---\n\nReturn ONLY a JSON array of 5 dishes.", temperature=0.5, max_tokens=600)
         if not text:
             return None
         text = text.strip()
@@ -227,6 +225,8 @@ def generate_menu(pantry_items, preferences="", diversity_hint=""):
         logger.exception("generate_menu failed")
         return None
 
+
+# --- Recipe Elaboration ---
 
 def elaborate_recipe(search_query, pantry_items=None, preferences=""):
     sites = detect_cuisine(search_query + " " + preferences)
@@ -251,14 +251,13 @@ def elaborate_recipe(search_query, pantry_items=None, preferences=""):
     )
 
     try:
-        result = _groq_call(prompt, "You are a professional recipe writer. Write detailed, practical recipes.", model=GROQ_QUALITY_MODEL, temperature=0.5, max_tokens=2500)
-        return result or f"AI error: No response"
+        result = _gemini_call(prompt, CHEF_PERSONA + "\n\n---\n\nWrite detailed, practical recipes using the format provided.", temperature=0.5, max_tokens=2500)
+        return result or "AI error: No response"
     except Exception as e:
         logger.exception("elaborate_recipe failed")
         return f"AI error: {e}"
 
 
-# Keep for backward compat — used by /canbake for strict pantry-only suggestion
 def suggest_recipe(user_id, pantry_items, preferences=""):
     items_str = ", ".join(pantry_items) if pantry_items else "nothing specific"
     search_query = re.sub(r"(suggest|recipe|make|cook|give me|i want|can i)", "", preferences, flags=re.I).strip()
@@ -276,10 +275,10 @@ def suggest_recipe(user_id, pantry_items, preferences=""):
     )
 
     try:
-        return _groq_call(prompt, "You are a chef assistant. Suggest only real, well-known dishes.", temperature=0.5, max_tokens=1200) or f"AI error"
+        return _gemini_call(prompt, CHEF_PERSONA + "\n\n---\n\nSuggest 1-3 realistic dishes based on the user's request and available ingredients.", temperature=0.5, max_tokens=1200) or "AI error"
     except Exception as e:
         logger.exception("suggest_recipe failed")
-        return f"AI error: {e}"
+        return "AI error"
 
 
 def parse_recipe_text(text):
@@ -287,98 +286,89 @@ def parse_recipe_text(text):
     if not lines:
         return None
     title = lines[0].replace("**", "").replace("*", "")
-    desc = ""
+
+    description = ""
     ingredients = []
     instructions = []
     nutrition = {}
     mode = None
-    for line in lines[1:]:
-        clean = line.replace("**", "").replace("*", "")
-        low = clean.lower()
-        if "ingredient" in low:
+
+    for line in lines:
+        lower = line.lower()
+        if "ingredient" in lower and any(line.lstrip().startswith(p) for p in ["**", "*", "-"]):
             mode = "ingredients"
             continue
-        elif "instruction" in low or "step" in low:
+        if ("instruction" in lower or "step" in lower) and any(line.lstrip().startswith(p) for p in ["**", "*", "-"]):
             mode = "instructions"
             continue
-        elif "protein" in low and "calorie" in low:
-            mode = "nutrition"
-            continue
-        elif "why it works" in low or "time overview" in low or "serving" in low or "storage" in low or "notes" in low or "tips" in low:
+        if any(w in lower for w in ["serving suggestion", "storage", "success tips", "why it works", "recipe notes", "time overview"]):
             mode = None
             continue
-        elif mode is None and len(clean) > 20:
-            if not desc:
-                desc = clean
-            continue
+
         if mode == "ingredients":
-            ing = clean.lstrip("•-*0123456789. ").strip()
-            if ing:
-                ingredients.append(ing)
+            clean = line.replace("-", "").replace("*", "").strip()
+            match = re.match(r"^\d+[.)]\s*", clean)
+            if match:
+                clean = clean[match.end():]
+            if "protein" not in lower and "calorie" not in lower:
+                ingredients.append(clean)
         elif mode == "instructions":
-            step = clean.lstrip("0123456789. ").strip()
-            if step:
-                instructions.append(step)
-        elif mode == "nutrition":
-            if ":" in clean:
-                k, v = clean.split(":", 1)
-                nutrition[k.strip().lower()] = v.strip()
-    protein = calories = sodium = 0
-    for k, v in nutrition.items():
-        nums = [int(s) for s in v.split() if s.isdigit()]
-        if nums:
-            if "protein" in k:
-                protein = nums[0]
-            elif "calorie" in k:
-                calories = nums[0]
-            elif "sodium" in k:
-                sodium = nums[0]
-    return {"title": title, "description": desc, "ingredients": ingredients,
-            "instructions": instructions, "protein_g": protein, "calories": calories, "sodium_mg": sodium}
+            step_match = re.match(r"\s*(\d+)[.)]\s*(.*)", line)
+            if step_match:
+                step_text = step_match.group(2).replace("**", "").replace("*", "").strip()
+                if step_text:
+                    instructions.append(step_text)
+
+        for key, label in [("protein", "protein_g"), ("calorie", "calories"), ("sodium", "sodium_mg")]:
+            if key in lower:
+                nums = re.findall(r"(\d+\.?\d*)\s*(?:g|mg|cal|kcal)?", line, re.I)
+                if nums:
+                    try:
+                        nutrition[label] = float(nums[0])
+                    except ValueError:
+                        pass
+
+    return {
+        "title": title.strip(),
+        "description": description or title.strip(),
+        "ingredients": ingredients or ["No ingredients listed"],
+        "instructions": instructions or ["No instructions"],
+        "protein_g": int(nutrition.get("protein_g", 0)),
+        "calories": int(nutrition.get("calories", 0)),
+        "sodium_mg": int(nutrition.get("sodium_mg", 0)),
+    }
 
 
-def generate_recipe_by_name(recipe_name, preferences=""):
-    web = search_web(recipe_name, 3, ALL_SITES)
-    prompt = f"Create a detailed recipe for: {recipe_name}.\n{preferences}\n"
-    if web:
-        prompt += f"\nWeb references:\n{web}\n"
-    prompt += f"\nFormat:\n{DETAILED_FORMAT}"
-    try:
-        return _groq_call(prompt, "You are a professional recipe writer.", model=GROQ_QUALITY_MODEL, temperature=0.5, max_tokens=2500)
-    except Exception:
-        logger.exception("generate_recipe_by_name failed")
-        return None
+# --- Nutrition ---
 
-
-def nutrition_info(food_name):
+def get_nutrition(food_name):
     prompt = (
-        f"Provide the nutritional breakdown for {food_name} (per 100g). "
-        "Return ONLY valid JSON with keys: calories, protein_g, carbs_g, fat_g, sodium_mg. "
-        'Example: {"calories": 250, "protein_g": 20, "carbs_g": 5, "fat_g": 15, "sodium_mg": 400}'
+        f"Estimated nutrition per 100g for {food_name}. "
+        "Return ONLY JSON with keys: name, calories_per_100g (kcal), protein_g, "
+        "carbs_g, fat_g, sodium_mg. Use realistic averages."
     )
     try:
-        text = _groq_call(prompt, "You are a nutritionist. Respond only with JSON.", temperature=0.3, max_tokens=300)
+        text = _gemini_call(prompt, "You are a nutritionist. Respond only with JSON.", temperature=0.3, max_tokens=300)
         if not text:
-            return {"calories": 0, "protein_g": 0, "carbs_g": 0, "fat_g": 0, "sodium_mg": 0}
+            return None
         text = text.strip()
         text = text.replace("```json", "").replace("```", "").strip()
         start, end = text.find("{"), text.rfind("}")
         if start >= 0 and end > start:
             text = text[start:end+1]
         return json.loads(text)
-    except Exception:
-        logger.exception("nutrition_info failed")
-        return {"calories": 0, "protein_g": 0, "carbs_g": 0, "fat_g": 0, "sodium_mg": 0}
+    except Exception as e:
+        logger.exception("get_nutrition failed")
+        return None
 
 
-def estimate_meal_calories(meal_description):
+def meal_nutrition(meal_description):
     prompt = (
-        f"Estimate nutritional content: \"{meal_description}\". "
-        "Return ONLY JSON with keys: calories, protein_g, sodium_mg. "
-        'Example: {"calories": 650, "protein_g": 35, "sodium_mg": 800}'
+        f"Estimate total calories, protein (g), and sodium (mg) for: {meal_description}. "
+        "Return ONLY JSON with keys: calories, protein_g, sodium_mg."
     )
     try:
-        text = _groq_call(prompt, "You are a nutritionist. Respond only with JSON.", temperature=0.3, max_tokens=200)
+        text = _gemini_call(prompt, "You are a nutritionist. Respond only with JSON.", temperature=0.3, max_tokens=200)
         if not text:
             return {"calories": 0, "protein_g": 0, "sodium_mg": 0}
         text = text.strip()
@@ -388,12 +378,13 @@ def estimate_meal_calories(meal_description):
             text = text[start:end+1]
         return json.loads(text)
     except Exception:
-        logger.exception("estimate_meal_calories failed")
+        logger.exception("meal_nutrition failed")
         return {"calories": 0, "protein_g": 0, "sodium_mg": 0}
 
 
+# --- Natural Language Processing ---
+
 def process_natural_language(user_message, pantry_items=None, recipes=None):
-    # Quick keyword routes — skip AI for simple intents
     msg = user_message.lower().strip()
     if any(w in msg for w in ["what do i have", "whats in my", "show my", "list my"]):
         msg_tokens = msg.split()
@@ -423,7 +414,7 @@ def process_natural_language(user_message, pantry_items=None, recipes=None):
         '{"action":"elaborate","items":["chicken katsu"],"message":"Let me elaborate..."}'
     )
     try:
-        text = _groq_call(prompt, "You are a kitchen assistant. Reply only in JSON.", temperature=0.1, max_tokens=200)
+        text = _gemini_call(prompt, "You are a kitchen assistant. Reply only in JSON.", temperature=0.1, max_tokens=200)
         if not text:
             return {"action": "chat", "items": [], "message": "Sorry, I couldn't process that. Try again."}
         text = text.strip()
@@ -466,50 +457,60 @@ def process_natural_language(user_message, pantry_items=None, recipes=None):
         return {"action": "chat", "items": [], "message": "Hi! Try: add chicken to pantry or suggest a recipe"}
 
 
-def recognize_food_from_image(base64_image):
+# --- Vision ---
+
+def _vision_call(prompt_text, base64_image):
     try:
         resp = client.chat.completions.create(
-            model=GROQ_VISION_MODEL,
+            model=GEMINI_MODEL,
             messages=[{"role": "user", "content": [
-                {"type": "text", "text": (
-                    "Identify this food. Return ONLY JSON with keys: name, description, "
-                    "calories_per_100g, protein_g_per_100g, carbs_g_per_100g, "
-                    "fat_g_per_100g, sodium_mg_per_100g."
-                )},
+                {"type": "text", "text": prompt_text},
                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}},
             ]}],
             temperature=0.3, max_tokens=500,
         )
-        text = resp.choices[0].message.content.strip()
+        _daily_count += 1
+        return resp.choices[0].message.content.strip()
+    except Exception as e:
+        logger.exception("_vision_call failed")
+        return None
+
+
+def recognize_food_from_image(base64_image):
+    text = _vision_call(
+        "Identify this food. Return ONLY JSON with keys: name, description, "
+        "calories_per_100g, protein_g_per_100g, carbs_g_per_100g, "
+        "fat_g_per_100g, sodium_mg_per_100g.",
+        base64_image,
+    )
+    if not text:
+        return {"error": "Could not identify food", "name": "Unknown", "description": "",
+                "calories_per_100g": 0, "protein_g_per_100g": 0,
+                "carbs_g_per_100g": 0, "fat_g_per_100g": 0, "sodium_mg_per_100g": 0}
+    try:
         text = text.replace("```json", "").replace("```", "").strip()
         start, end = text.find("{"), text.rfind("}")
         if start >= 0 and end > start:
             text = text[start:end+1]
         return json.loads(text)
     except Exception:
-        logger.exception("recognize_food_from_image failed")
         return {"error": "Could not identify food", "name": "Unknown", "description": "",
                 "calories_per_100g": 0, "protein_g_per_100g": 0,
                 "carbs_g_per_100g": 0, "fat_g_per_100g": 0, "sodium_mg_per_100g": 0}
 
 
 def scan_receipt_from_image(base64_image):
+    text = _vision_call(
+        "Extract the food and grocery item names from this receipt photo. "
+        "Return ONLY a JSON array of strings with just the item names, e.g. "
+        '["whole milk", "chicken breast", "white rice", "garlic"]. '
+        "Skip non-food items (cleaning products, plastic bags, toiletries, etc.). "
+        "Include only edible food and drink items. Normalize names to lower case.",
+        base64_image,
+    )
+    if not text:
+        return []
     try:
-        resp = client.chat.completions.create(
-            model=GROQ_VISION_MODEL,
-            messages=[{"role": "user", "content": [
-                {"type": "text", "text": (
-                    "Extract the food and grocery item names from this receipt photo. "
-                    "Return ONLY a JSON array of strings with just the item names, e.g. "
-                    '["whole milk", "chicken breast", "white rice", "garlic"]. '
-                    "Skip non-food items (cleaning products, plastic bags, toiletries, etc.). "
-                    "Include only edible food and drink items. Normalize names to lower case."
-                )},
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}},
-            ]}],
-            temperature=0.1, max_tokens=500,
-        )
-        text = resp.choices[0].message.content.strip()
         text = text.replace("```json", "").replace("```", "").strip()
         start, end = text.find("["), text.rfind("]")
         if start >= 0 and end > start:
@@ -522,6 +523,8 @@ def scan_receipt_from_image(base64_image):
     return []
 
 
+# --- Recipe Follow-up ---
+
 def recipe_followup(recipe_text, user_question):
     prompt = (
         f"Here is the current recipe:\n{recipe_text}\n\n"
@@ -530,11 +533,13 @@ def recipe_followup(recipe_text, user_question):
         "Reference the recipe details in your answer. Keep it concise."
     )
     try:
-        return _groq_call(prompt, "You are a helpful chef assistant. Answer questions about the current recipe.", temperature=0.5, max_tokens=600) or f"AI error"
+        return _gemini_call(prompt, CHEF_PERSONA + "\n\n---\n\nAnswer the user's question about the current recipe. Be helpful and specific.", temperature=0.5, max_tokens=600) or "AI error"
     except Exception as e:
         logger.exception("recipe_followup failed")
-        return f"AI error: {e}"
+        return "AI error"
 
+
+# --- Ingredient Parsing ---
 
 def parse_ingredients_from_text(recipe_text):
     prompt = (
@@ -543,7 +548,7 @@ def parse_ingredients_from_text(recipe_text):
         'Example: ["chicken breast", "soy sauce", "rice", "garlic"]'
     )
     try:
-        text = _groq_call(prompt, "You are a recipe parser. Respond only with JSON array.", temperature=0.1, max_tokens=300)
+        text = _gemini_call(prompt, "You are a recipe parser. Respond only with JSON array.", temperature=0.1, max_tokens=300)
         if not text:
             return ["Error could not parse ingredients"]
         text = text.strip()
@@ -554,8 +559,10 @@ def parse_ingredients_from_text(recipe_text):
         return json.loads(text)
     except Exception as e:
         logger.exception("parse_ingredients_from_text failed")
-        return f"Could not parse ingredients: {e}"
+        return ["Could not parse ingredients"]
 
+
+# --- Shopping List ---
 
 def generate_shopping_list(recipe_title, missing_ingredients):
     prompt = (
@@ -563,10 +570,10 @@ def generate_shopping_list(recipe_title, missing_ingredients):
         "Suggest quantities in metric units and estimated prices in SGD. Return as bullet list."
     )
     try:
-        return _groq_call(prompt, "You are a helpful shopping assistant.", temperature=0.5, max_tokens=400) or f"AI error"
+        return _gemini_call(prompt, "You are a helpful shopping assistant.", temperature=0.5, max_tokens=400) or "AI error"
     except Exception as e:
         logger.exception("generate_shopping_list failed")
-        return f"AI error: {e}"
+        return "AI error"
 
 
 # --- Substitution ---
@@ -581,10 +588,10 @@ def substitute_ingredient(recipe_text, substitution_text):
         "Keep the same format as the original recipe with all sections."
     )
     try:
-        return _groq_call(prompt, "You are a professional recipe writer. Modify the recipe with the requested substitution.", model=GROQ_QUALITY_MODEL, temperature=0.5, max_tokens=2500) or f"AI error"
+        return _gemini_call(prompt, CHEF_PERSONA + "\n\n---\n\nModify the recipe with the requested substitution. Return the FULL updated recipe.", temperature=0.5, max_tokens=2500) or "AI error"
     except Exception as e:
         logger.exception("substitute_ingredient failed")
-        return f"AI error: {e}"
+        return "AI error"
 
 
 # --- Scale ---
@@ -599,27 +606,29 @@ def scale_recipe(recipe_text, factor, target_servings=None):
         "Keep the same format with all sections."
     )
     try:
-        return _groq_call(prompt, "You are a professional recipe writer. Scale the recipe accurately.", model=GROQ_QUALITY_MODEL, temperature=0.5, max_tokens=2500) or f"AI error"
+        return _gemini_call(prompt, CHEF_PERSONA + "\n\n---\n\nScale the recipe accurately. Return the FULL updated recipe with all ingredient quantities rescaled.", temperature=0.5, max_tokens=2500) or "AI error"
     except Exception as e:
         logger.exception("scale_recipe failed")
-        return f"AI error: {e}"
+        return "AI error"
 
 
-# --- Voice Transcription ---
+# --- Audio Transcription ---
 
 def transcribe_audio(audio_bytes, filename="audio.ogg"):
     try:
-        import tempfile, os
-        fd, path = tempfile.mkstemp(suffix=".ogg")
-        os.write(fd, audio_bytes)
-        os.close(fd)
-        with open(path, "rb") as f:
-            transcript = client.audio.transcriptions.create(
-                model="whisper-large-v3",
-                file=(filename, f, "audio/ogg"),
-            )
-        os.unlink(path)
-        return transcript.text
+        mime = "audio/ogg"
+        if filename.endswith(".mp3"):
+            mime = "audio/mpeg"
+        elif filename.endswith(".wav"):
+            mime = "audio/wav"
+        elif filename.endswith(".m4a"):
+            mime = "audio/mp4"
+        response = genai_client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=["Transcribe this audio exactly as spoken, including any pauses or hesitations:", genai.types.Part.from_bytes(data=audio_bytes, mime_type=mime)]
+        )
+        _daily_count += 1
+        return response.text
     except Exception as e:
         logger.exception("transcribe_audio failed")
         return None
@@ -648,7 +657,7 @@ def generate_batch_menu(count, cuisine, pantry_items, preferences="", diversity_
         'Example: [{"title":"Chicken Katsu Curry","description":"Crispy panko chicken with Japanese curry sauce","search_query":"chicken katsu curry recipe"}]'
     )
     try:
-        text = _groq_call(prompt, "You are a chef. Return ONLY a JSON array.", temperature=0.5, max_tokens=800)
+        text = _gemini_call(prompt, CHEF_PERSONA + "\n\n---\n\nSuggest a balanced multi-dish meal. Return ONLY a JSON array.", temperature=0.5, max_tokens=800)
         if not text:
             return None
         text = text.strip()
@@ -681,10 +690,10 @@ def plan_batch(dish_titles, cuisine):
         "- Use metric measurements."
     )
     try:
-        return _groq_call(prompt, "You are a professional chef specialized in meal planning and timing.", model=GROQ_QUALITY_MODEL, temperature=0.5, max_tokens=4000) or f"AI error"
+        return _gemini_call(prompt, CHEF_PERSONA + "\n\n---\n\nCreate a consolidated cooking plan with detailed recipes and a cooking timeline.", temperature=0.5, max_tokens=4000) or "AI error"
     except Exception as e:
         logger.exception("plan_batch failed")
-        return f"AI error: {e}"
+        return "AI error"
 
 
 # --- Pantry Sorting ---
@@ -709,7 +718,7 @@ def categorize_pantry_items(items):
         'Example: {"chicken": "Proteins & Prepared Meats", "broccoli": "Vegetables & Fruits", "soy sauce": "Sauces, Condiments & Fermented"}'
     )
     try:
-        text = _groq_call(prompt, "You are a kitchen inventory assistant. Respond only with JSON.", temperature=0.1, max_tokens=1000)
+        text = _gemini_call(prompt, "You are a kitchen inventory assistant. Respond only with JSON.", temperature=0.1, max_tokens=1000)
         if not text:
             return {}
         text = text.strip().replace("```json", "").replace("```", "").strip()
@@ -725,7 +734,7 @@ def categorize_pantry_items(items):
         return {}
 
 
-# --- Improvise (use expiring ingredients) ---
+# --- Improvise ---
 
 def generate_improvise_menu(expiring_items, pantry_items, preferences=""):
     items_str = ", ".join(pantry_items) if pantry_items else ""
@@ -750,7 +759,7 @@ def generate_improvise_menu(expiring_items, pantry_items, preferences=""):
     )
 
     try:
-        text = _groq_call(prompt, "You are a chef focused on reducing food waste. Return ONLY a JSON array.", temperature=0.5, max_tokens=600)
+        text = _gemini_call(prompt, CHEF_PERSONA + "\n\n---\n\nSuggest 5 dishes that use at least 75% of the expiring ingredients. Return ONLY a JSON array.", temperature=0.5, max_tokens=600)
         if not text:
             return None
         text = text.strip()
@@ -814,14 +823,12 @@ def _format_iso_duration(dur):
 
 
 def _clean_jsonld_text(text):
-    """Clean HTML entities and encoding corruption from JSON-LD text fields."""
     text = html.unescape(text)
     text = text.replace('\u2001', "'")
     return text.strip()
 
 
 def _flatten_instructions(instructions):
-    """Recursively flatten HowToStep and HowToSection into a list of step strings."""
     if isinstance(instructions, str):
         return [_clean_jsonld_text(instructions)]
     if not isinstance(instructions, list):
@@ -926,10 +933,10 @@ def import_recipe_from_url(url):
         f"{DETAILED_FORMAT}"
     )
     try:
-        return _groq_call(
+        return _gemini_call(
             prompt,
-            "You extract recipes from web pages. Return only the recipe in the requested format.",
-            model=GROQ_QUALITY_MODEL, temperature=0.3, max_tokens=2500,
+            CHEF_PERSONA + "\n\n---\n\nExtract the complete recipe from the web page content. Return only the recipe in the requested format.",
+            temperature=0.3, max_tokens=2500,
         )
     except Exception:
         logger.exception("import_recipe_from_url: LLM extraction failed")
@@ -939,7 +946,6 @@ def import_recipe_from_url(url):
 # --- Cooking Mode ---
 
 def parse_cook_recipe(recipe_text):
-    """Extract title, ingredients block, and step list from a formatted recipe."""
     lines = recipe_text.split("\n")
     title = ""
     ingredients = []
@@ -982,6 +988,8 @@ def parse_cook_recipe(recipe_text):
     }
 
 
+# --- Random Ingredient ---
+
 def suggest_random_ingredient(country=""):
     reality_check = (
         "CRITICAL: Only suggest ingredients that are 100% real and verifiable. "
@@ -1017,28 +1025,18 @@ def suggest_random_ingredient(country=""):
             "Vary the category each time — spices, pastes, fermented items, sauces, condiments, preserved things."
         )
     system = (
-        "You are a creative food explorer suggesting unique ingredients. Be surprising and educational. "
+        CHEF_PERSONA + "\n\n---\n\nSuggest a single random, unusual ingredient. Be surprising and educational. "
         "Never make up ingredients."
         if not country else
-        f"You are a culinary expert in {country} cuisine. Be authentic, surprising, and educational. "
+        CHEF_PERSONA + f"\n\n---\n\nSuggest a single random, unusual ingredient from {country} cuisine. "
+        "Be authentic, surprising, and educational. "
         "Never make up ingredients."
     )
     try:
-        return _groq_call(
+        return _gemini_call(
             prompt, system,
-            model=GROQ_QUALITY_MODEL, temperature=0.9, max_tokens=1200,
+            temperature=0.9, max_tokens=1200,
         ) or "AI error"
-    except RuntimeError:
-        # Rate limited on quality model — fall back to high-RPD model
-        pass
     except Exception as e:
         logger.exception("suggest_random_ingredient failed")
-        return f"AI error: {e}"
-    try:
-        return _groq_call(
-            prompt, system,
-            model=None, temperature=0.9, max_tokens=1200,
-        ) or "AI error"
-    except Exception as e:
-        logger.exception("suggest_random_ingredient fallback failed")
-        return f"AI error: {e}"
+        return "AI error"
