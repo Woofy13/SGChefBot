@@ -2089,6 +2089,27 @@ async def _handle_user_text(update, context, user_id, text):
             await msg.edit_text(answer)
             return
 
+    # --- Route bare numbers to recipe view (before NL) ---
+    t_stripped = text.strip()
+    if re.fullmatch(r'\d+(?:[,\s]\d+)*', t_stripped):
+        first_num = int(re.findall(r'\d+', t_stripped)[0])
+        user_recipes = db.get_recipes(user_id)
+        if 1 <= first_num <= len(user_recipes):
+            recipe = db.get_recipe(user_id, user_recipes[first_num - 1]["id"])
+            if recipe:
+                text_out = _format_recipe(recipe)
+                _last_suggestion[user_id] = text_out
+                _is_saved_recipe[user_id] = True
+                _pending_cooked[raw_user_id] = recipe["title"]
+                keyboard = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("👨‍🍳 Cook Mode", callback_data="cook_recipe"),
+                     InlineKeyboardButton("📤 Export", callback_data="export_last"),
+                     InlineKeyboardButton("✅ Cooked!", callback_data="cooked")],
+                ])
+                sanitized = _sanitize_markdown(text_out)
+                await _reply_chunked(update.effective_message, sanitized, parse_mode="Markdown", reply_markup=keyboard)
+                return
+
     # --- NL Processing ---
     msg = await update.effective_message.reply_text("Thinking...")
     result = ai.process_natural_language(text, pantry, recipes)
