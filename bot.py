@@ -5,6 +5,8 @@ import base64
 import os
 import tempfile
 import re
+import zipfile
+import io
 from datetime import datetime, date, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -40,6 +42,9 @@ _cook_state = {}  # user_id -> {"title": str, "ingredients": list[str], "steps":
 
 # Pending cooked dish tracking
 _pending_cooked = {}  # user_id -> dish_name (str) or list of dish names (batch)
+
+# Batch export state
+_batch_export = {}  # user_id -> {"step": "awaiting_input"}
 
 # Photo tracking
 _photo_counts = {}  # user_id -> date
@@ -253,6 +258,17 @@ def _format_recipe(recipe):
         s = recipe.get("sodium_mg", 0)
         lines.append(f"⚡ {c} cal | 🥩 {p}g protein | 🧂 {s}mg sodium")
     return "\n".join(lines)
+
+
+def _create_recipe_export_zip(recipes):
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for i, recipe in enumerate(recipes, 1):
+            md = _format_recipe(recipe)
+            safe_name = re.sub(r'[^\w\s-]', '', recipe['title']).strip().replace(' ', '_')[:50]
+            zf.writestr(f"{i:02d}_{safe_name}.md", md)
+    buffer.seek(0)
+    return buffer
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1234,12 +1250,12 @@ def _build_recipe_list(recipes):
 
     buttons = []
     if view_row:
-        # Split into rows of 8 (Telegram max per row)
         for start in range(0, len(view_row), 8):
             buttons.append(view_row[start:start+8])
     if delete_row:
         for start in range(0, len(delete_row), 8):
             buttons.append(delete_row[start:start+8])
+    buttons.append([InlineKeyboardButton("📦 Batch Export", callback_data="export_batch")])
 
     return "\n".join(lines), InlineKeyboardMarkup(buttons) if buttons else None
 
@@ -1285,6 +1301,26 @@ async def delete_recipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     db.delete_recipe(_effective_user_id(update.effective_user.id), int(args[0]))
     await update.message.reply_text(f"🗑️ Deleted recipe #{args[0]}")
+
+
+async def export_batch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = _effective_user_id(query.from_user.id)
+    _batch_export[user_id] = {"step": "awaiting_input"}
+    recipes = db.get_recipes(user_id)
+    if not recipes:
+        await query.edit_message_text("No recipes to export.")
+        _batch_export.pop(user_id, None)
+        return
+    count = len(recipes)
+    await query.edit_message_text(
+        f"📦 *Batch Export*\n\nYou have {count} recipe(s). "
+        "Which ones to export? Reply with:\n"
+        "• Numbers like `1,2,3` or `1-4`\n"
+        "• `all` for everything",
+        parse_mode="Markdown",
+    )
 
 
 async def delete_recipe_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1838,6 +1874,60 @@ async def _handle_user_text(update, context, user_id, text):
         else:
             await update.effective_message.reply_text("Could not generate suggestions. Try a different cuisine.")
             state["cuisine"] = ""
+        return
+
+    # Batch export: user is replying with recipe numbers
+    export_state = _batch_export.get(raw_user_id)
+    if export_state and export_state.get("step") == "awaiting_input":
+        _batch_export.pop(raw_user_id, None)
+        t_lower = text.lower().strip()
+        user_recipes = db.get_recipes(user_id)
+        if not user_recipes:
+            await update.effective_message.reply_text("No recipes to export.")
+            return
+        if t_lower == "all":
+            selected = user_recipes
+        else:
+            indices = set()
+            # Parse "1,2,3" or "1-4" or "1 2 3"
+            for part in re.split(r'[,\s]+', t_lower):
+                part = part.strip()
+                if not part:
+                    continue
+                if '-' in part:
+                    try:
+                        a, b = part.split('-', 1)
+                        start, end = int(a.strip()), int(b.strip())
+                        indices.update(range(start, end + 1))
+                    except ValueError:
+                        pass
+                else:
+                    try:
+                        indices.add(int(part))
+                    except ValueError:
+                        pass
+            selected = []
+            for i in sorted(indices):
+                if 1 <= i <= len(user_recipes):
+                    selected.append(db.get_recipe(user_id, user_recipes[i - 1]["id"]))
+            if not selected:
+                await update.effective_message.reply_text(
+                    "No valid recipe numbers found. Use numbers like `1,2,3`, `1-4`, or `all`.",
+                    parse_mode="Markdown",
+                )
+                return
+        # Create zip
+        try:
+            zip_buffer = _create_recipe_export_zip(selected)
+            caption = f"📦 Exported {len(selected)} recipe(s)"
+            await update.effective_message.reply_document(
+                document=zip_buffer,
+                filename="RecipeExport.zip",
+                caption=caption,
+            )
+        except Exception as e:
+            logger.exception("Batch export failed")
+            await update.effective_message.reply_text(f"Export failed: {e}")
         return
 
     # Pre-check: dish selection (dish 1, first one, etc.) — bypass AI
@@ -2398,6 +2488,7 @@ def create_app(token: str):
     app.add_handler(CallbackQueryHandler(cook_callback, pattern="^cook_next$"))
     app.add_handler(CallbackQueryHandler(cook_done_callback, pattern="^cook_done$"))
     app.add_handler(CallbackQueryHandler(cook_from_recipe_callback, pattern="^cook_recipe$"))
+    app.add_handler(CallbackQueryHandler(export_batch_callback, pattern="^export_batch$"))
     app.add_handler(CallbackQueryHandler(delete_recipe_callback, pattern="^delrecipe_"))
     app.add_handler(CallbackQueryHandler(view_recipe_callback, pattern="^viewrecipe_"))
     app.add_handler(CallbackQueryHandler(shop_callback, pattern="^shop_"))
