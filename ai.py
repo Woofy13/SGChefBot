@@ -64,7 +64,7 @@ def _extract_json_array(text):
     raise ValueError("No JSON array found in response")
 
 
-def _gemini_call(prompt, system_msg, temperature=0.5, max_tokens=600):
+def _gemini_call(prompt, system_msg, temperature=0.5, max_tokens=600, disable_thinking=False):
     global _daily_count, _daily_date
 
     today = date.today()
@@ -79,15 +79,13 @@ def _gemini_call(prompt, system_msg, temperature=0.5, max_tokens=600):
 
     for attempt in range(4):
         try:
-            resp = client.chat.completions.create(
-                model=GEMINI_MODEL,
-                messages=msg,
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
+            kwargs = dict(model=GEMINI_MODEL, messages=msg, temperature=temperature, max_tokens=max_tokens)
+            if disable_thinking:
+                kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+            resp = client.chat.completions.create(**kwargs)
             _daily_count += 1
             text = resp.choices[0].message.content
-            text = re.sub(r'<think>.*?(</think>|$)', '', text, flags=re.DOTALL).strip()
+            text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
             return text
         except Exception as e:
             err_str = str(e)
@@ -253,7 +251,7 @@ def generate_menu(pantry_items, preferences="", diversity_hint=""):
     )
 
     try:
-        text = _gemini_call(prompt, CHEF_JSON_SYSTEM, temperature=0.5, max_tokens=1500)
+        text = _gemini_call(prompt, CHEF_JSON_SYSTEM, temperature=0.5, max_tokens=1500, disable_thinking=True)
         if not text:
             return None
         return _extract_json_array(text)
@@ -319,7 +317,7 @@ def suggest_recipe(pantry_items, preferences=""):
     )
 
     try:
-        text = _gemini_call(prompt, CHEF_JSON_SYSTEM, temperature=0.5, max_tokens=800)
+        text = _gemini_call(prompt, CHEF_JSON_SYSTEM, temperature=0.5, max_tokens=800, disable_thinking=True)
         if not text:
             return None
         return _extract_json_array(text)
@@ -704,7 +702,7 @@ def generate_batch_menu(count, cuisine, pantry_items, preferences="", diversity_
         'Example: [{"title":"Chicken Katsu Curry","description":"Crispy panko chicken with Japanese curry sauce","search_query":"chicken katsu curry recipe"}]'
     )
     try:
-        text = _gemini_call(prompt, CHEF_JSON_SYSTEM, temperature=0.5, max_tokens=800)
+        text = _gemini_call(prompt, CHEF_JSON_SYSTEM, temperature=0.5, max_tokens=800, disable_thinking=True)
         if not text:
             return None
         return _extract_json_array(text)
@@ -800,7 +798,7 @@ def generate_improvise_menu(expiring_items, pantry_items, preferences=""):
     )
 
     try:
-        text = _gemini_call(prompt, CHEF_JSON_SYSTEM, temperature=0.5, max_tokens=800)
+        text = _gemini_call(prompt, CHEF_JSON_SYSTEM, temperature=0.5, max_tokens=800, disable_thinking=True)
         if not text:
             return None
         return _extract_json_array(text)
