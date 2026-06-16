@@ -295,11 +295,12 @@ def suggest_recipe(user_id, pantry_items, preferences=""):
         prompt += f"\nWeb references:\n{web}\n"
     prompt += (
         "\nSuggest 1-3 realistic dishes. Use the standard format with metric measurements. "
-        "Include protein (g), calories, sodium (mg). Mark [BUY] for needed ingredients."
+        "Include protein (g), calories, sodium (mg). Mark [BUY] for needed ingredients. "
+        "No preamble, no introduction, no chef commentary — start directly with the first dish."
     )
 
     try:
-        return _gemini_call(prompt, CHEF_PERSONA + "\n\n---\n\nSuggest 1-3 realistic dishes based on the user's request and available ingredients.", temperature=0.5, max_tokens=1200) or "AI error"
+        return _gemini_call(prompt, CHEF_PERSONA + "\n\n---\nSuggest 1-3 realistic dishes. No preamble, no intro, no chef commentary — start directly with the first recipe.", temperature=0.5, max_tokens=1200) or "AI error"
     except Exception as e:
         logger.exception("suggest_recipe failed")
         return "AI error"
