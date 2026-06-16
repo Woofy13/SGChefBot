@@ -219,11 +219,12 @@ def detect_cuisine(query):
 
 def generate_menu(pantry_items, preferences="", diversity_hint=""):
     items_str = ", ".join(pantry_items) if pantry_items else ""
-    query = re.sub(r"(suggest|recipe|make|cook|give me|i want|can i|what can)", "", preferences or items_str, flags=re.I).strip()
-    # Strip metadata lines (Equipment, Diet, etc.) from search query
-    query = re.sub(r'\nEquipment:.*(\n|$)', '', query, flags=re.I | re.DOTALL)
-    query = re.sub(r'\nDiet:.*(\n|$)', '', query, flags=re.I | re.DOTALL)
-    query = query.strip()
+    query = (preferences or items_str)
+    # Strip metadata lines first (before word removal to avoid fragments)
+    query = re.sub(r'(?im)^(Equipment|Diet):.*$', '', query)
+    query = re.sub(r'\n+', '\n', query).strip()
+    # Remove command words (with word boundaries to avoid partial matches like 'recipes' -> 's')
+    query = re.sub(r"(?i)\b(?:suggest|recipe|make|cook)\b\s*|\b(?:i want|can i|give me|i can|what can)\b\s*", "", query).strip()
     sites = detect_cuisine(query)
     web = search_web(query, 5, sites)
 
@@ -294,9 +295,12 @@ def elaborate_recipe(search_query, pantry_items=None, preferences=""):
 def suggest_recipe(pantry_items, preferences=""):
     """Suggest dishes from pantry + staples, returns JSON array or None."""
     items_str = ", ".join(pantry_items) if pantry_items else "nothing specific"
-    search_query = re.sub(r"(suggest|recipe|make|cook|give me|i want|can i)", "", preferences, flags=re.I).strip()
-    search_query = re.sub(r'\nEquipment:.*(\n|$)', '', search_query, flags=re.I | re.DOTALL).strip()
-    search_query = re.sub(r'\nDiet:.*(\n|$)', '', search_query, flags=re.I | re.DOTALL).strip()
+    search_query = preferences
+    # Strip metadata lines first (before word removal to avoid fragments)
+    search_query = re.sub(r'(?im)^(Equipment|Diet):.*$', '', search_query)
+    search_query = re.sub(r'\n+', '\n', search_query).strip()
+    # Remove command words (with word boundaries to avoid partial matches like 'recipes' -> 's')
+    search_query = re.sub(r"(?i)\b(?:suggest|recipe|make|cook)\b\s*|\b(?:i want|can i|give me|i can|what can)\b\s*", "", search_query).strip()
     web = search_web(search_query or items_str, 3, ALL_SITES)
 
     prompt = (
