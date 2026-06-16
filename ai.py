@@ -46,6 +46,23 @@ def check_daily_limit(user_id):
         raise RuntimeError("You've reached your daily request limit (1,500). Try again tomorrow.")
 
 
+def _extract_json_array(text):
+    """Find and parse a JSON array from text, handling prose before/after."""
+    text = text.strip()
+    text = text.replace("```json", "").replace("```", "").strip()
+    match = re.search(r'\[\s*\{', text, re.DOTALL)
+    if match:
+        start = match.start()
+        end = text.rfind("]")
+        if end > start:
+            return json.loads(text[start:end+1])
+    start = text.find("[")
+    end = text.rfind("]")
+    if start >= 0 and end > start:
+        return json.loads(text[start:end+1])
+    raise ValueError("No JSON array found in response")
+
+
 def _gemini_call(prompt, system_msg, temperature=0.5, max_tokens=600):
     global _daily_count, _daily_date
 
@@ -227,19 +244,11 @@ def generate_menu(pantry_items, preferences="", diversity_hint=""):
         text = _gemini_call(prompt, CHEF_PERSONA + "\n\n---\nCRITICAL: Your response must start with `[` and end with `]`. Output ONLY a raw valid JSON array — no greeting, no chef commentary, no markdown, no explanation. If you include any text outside the JSON array, the system will crash.", temperature=0.5, max_tokens=600)
         if not text:
             return None
-        text = text.strip()
-        text = text.replace("```json", "").replace("```", "").strip()
-        start = text.find("[")
-        end = text.rfind("]")
-        if start >= 0 and end > start:
-            text = text[start:end+1]
-        return json.loads(text)
+        return _extract_json_array(text)
     except Exception as e:
         logger.exception("generate_menu failed")
         return None
 
-
-# --- Recipe Elaboration ---
 
 def elaborate_recipe(search_query, pantry_items=None, preferences=""):
     sites = detect_cuisine(search_query + " " + preferences)
@@ -675,13 +684,7 @@ def generate_batch_menu(count, cuisine, pantry_items, preferences="", diversity_
         text = _gemini_call(prompt, CHEF_PERSONA + "\n\n---\nCRITICAL: Your response must start with `[` and end with `]`. Output ONLY a raw valid JSON array — no greeting, no chef commentary, no markdown, no explanation. If you include any text outside the JSON array, the system will crash.", temperature=0.5, max_tokens=800)
         if not text:
             return None
-        text = text.strip()
-        text = text.replace("```json", "").replace("```", "").strip()
-        start = text.find("[")
-        end = text.rfind("]")
-        if start >= 0 and end > start:
-            text = text[start:end+1]
-        return json.loads(text)
+        return _extract_json_array(text)
     except Exception:
         logger.exception("generate_batch_menu failed")
         return None
@@ -777,13 +780,7 @@ def generate_improvise_menu(expiring_items, pantry_items, preferences=""):
         text = _gemini_call(prompt, CHEF_PERSONA + "\n\n---\nCRITICAL: Your response must start with `[` and end with `]`. Output ONLY a raw valid JSON array — no greeting, no chef commentary, no markdown, no explanation. If you include any text outside the JSON array, the system will crash.", temperature=0.5, max_tokens=600)
         if not text:
             return None
-        text = text.strip()
-        text = text.replace("```json", "").replace("```", "").strip()
-        start = text.find("[")
-        end = text.rfind("]")
-        if start >= 0 and end > start:
-            text = text[start:end+1]
-        return json.loads(text)
+        return _extract_json_array(text)
     except Exception:
         logger.exception("generate_improvise_menu failed")
         return None
