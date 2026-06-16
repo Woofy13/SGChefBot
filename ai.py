@@ -994,7 +994,8 @@ def suggest_random_ingredient(country=""):
             f"Suggest a single random, unusual ingredient or food item from {country} cuisine. "
             f"{reality_check}"
             "It should be authentic, interesting, and something a home cook might not have tried before. "
-            "Think beyond the obvious — unique spices, fermented items, specialty produce, sauces, condiments, etc. "
+            "Lean toward unique spices, fermented items, pastes, condiments, and seasonings — "
+            "the more aromatic and flavourful, the better. "
             f"Mention where to find it in Singapore (NTUC FairPrice, Cold Storage, Mustafa Centre, "
             "RedMart, Little Farms, specialty stores, online) or if it needs to be substituted. "
             "Return ONLY the ingredient info in exactly this format — no extra commentary:\n\n"
@@ -1003,14 +1004,15 @@ def suggest_random_ingredient(country=""):
             "**📍 Where to Find It (Singapore):** specific store/market names or substitution tips\n\n"
             "**🍳 How to Use It:** cooking ideas and dishes it elevates\n\n"
             "**🔬 The Science Behind It:** interesting food science fact\n\n"
-            f"Pick a different type of ingredient each time (not always spices or sauces). Vary it."
+            "Vary the category each time — spices, pastes, fermented items, sauces, condiments, preserved things."
         )
     else:
         prompt = (
             "Suggest a single random, unusual, quirky ingredient available in Singapore. "
             f"{reality_check}"
-            "Think outside the box — unusual produce, specialty sauces, interesting spices, "
-            "unique pantry items, artisanal products. Be creative but keep it real and findable "
+            "Think outside the box — unique spices, pastes, fermented items, sauces, condiments, "
+            "preserved ingredients, and aromatic seasonings. Avoid basic fruits and vegetables. "
+            "Be creative but keep it real and findable "
             "(NTUC FairPrice, Cold Storage, wet markets, Mustafa Centre, RedMart, Little Farms, etc.). "
             "Return ONLY the ingredient info in exactly this format — no extra commentary:\n\n"
             "**🛒 Ingredient:** name\n\n"
@@ -1018,7 +1020,7 @@ def suggest_random_ingredient(country=""):
             "**📍 Where to Find It (Singapore):** specific store/market names\n\n"
             "**🍳 How to Use It:** cooking ideas and dishes it elevates\n\n"
             "**🔬 The Science Behind It:** interesting food science fact\n\n"
-            "Pick a different category each time (not always sauces or spices). Vary it."
+            "Vary the category each time — spices, pastes, fermented items, sauces, condiments, preserved things."
         )
     system = (
         "You are a creative food explorer suggesting unique ingredients. Be surprising and educational. "
@@ -1029,10 +1031,20 @@ def suggest_random_ingredient(country=""):
     )
     try:
         return _groq_call(
-            prompt,
-            system,
+            prompt, system,
+            model=GROQ_QUALITY_MODEL, temperature=0.9, max_tokens=1200,
+        ) or "AI error"
+    except RuntimeError:
+        # Rate limited on quality model — fall back to high-RPD model
+        pass
+    except Exception as e:
+        logger.exception("suggest_random_ingredient failed")
+        return f"AI error: {e}"
+    try:
+        return _groq_call(
+            prompt, system,
             model=None, temperature=0.9, max_tokens=1200,
         ) or "AI error"
     except Exception as e:
-        logger.exception("suggest_random_ingredient failed")
+        logger.exception("suggest_random_ingredient fallback failed")
         return f"AI error: {e}"
