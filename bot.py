@@ -2525,7 +2525,14 @@ async def random_ingredient(update: Update, context: ContextTypes.DEFAULT_TYPE):
     country = " ".join(context.args).strip() if context.args else ""
     _random_country[user_id] = country
     msg = await update.message.reply_text("Thinking..." if not country else f"Finding a {country} ingredient...")
-    result = ai.suggest_random_ingredient(country)
+    try:
+        result = ai.suggest_random_ingredient(country)
+    except Exception as e:
+        await msg.edit_text("Something went wrong. Try again later.")
+        return
+    if result == "AI error" or result.startswith("Something went wrong"):
+        await msg.edit_text("Gemini is temporarily unavailable (high demand). Try again in a moment.")
+        return
     _last_suggestion[_effective_user_id(user_id)] = result
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("🔄 Regenerate", callback_data="random_regenerate")],
@@ -2539,7 +2546,14 @@ async def random_regenerate_callback(update: Update, context: ContextTypes.DEFAU
     await query.answer()
     user_id = query.from_user.id
     country = _random_country.get(user_id, "")
-    result = ai.suggest_random_ingredient(country)
+    try:
+        result = ai.suggest_random_ingredient(country)
+    except Exception as e:
+        await query.edit_message_text("Something went wrong. Try again later.")
+        return
+    if result == "AI error" or result.startswith("Something went wrong"):
+        await query.edit_message_text("Gemini is temporarily unavailable (high demand). Try again in a moment.")
+        return
     _last_suggestion[_effective_user_id(user_id)] = result
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("🔄 Regenerate", callback_data="random_regenerate")],

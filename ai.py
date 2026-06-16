@@ -59,7 +59,7 @@ def _gemini_call(prompt, system_msg, temperature=0.5, max_tokens=600):
 
     msg = [{"role": "system", "content": system_msg}, {"role": "user", "content": prompt}]
 
-    for attempt in range(3):
+    for attempt in range(4):
         try:
             resp = client.chat.completions.create(
                 model=GEMINI_MODEL,
@@ -74,10 +74,19 @@ def _gemini_call(prompt, system_msg, temperature=0.5, max_tokens=600):
         except Exception as e:
             err_str = str(e)
             if "429" in err_str or "Too Many Requests" in err_str or "RESOURCE_EXHAUSTED" in err_str:
-                if attempt < 2:
+                if attempt < 3:
                     time.sleep(5)
                     continue
                 raise RuntimeError("Gemini daily request limit reached (~1,500). Try again after midnight UTC.")
+            if "503" in err_str or "UNAVAILABLE" in err_str or "500" in err_str:
+                if attempt < 3:
+                    wait = 10 * (attempt + 1)
+                    time.sleep(wait)
+                    continue
+                raise RuntimeError("Gemini is temporarily unavailable (high demand). Please try again in a moment.")
+            if attempt < 3:
+                time.sleep(3)
+                continue
             raise
     return None
 
