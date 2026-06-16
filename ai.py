@@ -60,6 +60,7 @@ def _extract_json_array(text):
     end = text.rfind("]")
     if start >= 0 and end > start:
         return json.loads(text[start:end+1])
+    logger.error("No JSON array found. Raw response (first 500 chars): %s", text[:500])
     raise ValueError("No JSON array found in response")
 
 
@@ -114,6 +115,16 @@ CHEF_PERSONA = (
     "Reference modern techniques (like in The Flavor Bible, Salt Fat Acid Heat, or Modernist Cuisine). "
     "Prioritize ingredient synergy, cooking science, and accessibility. "
     "Make sure recipes are concise, without leaving out important steps."
+)
+
+CHEF_JSON_SYSTEM = (
+    "You are my AI Expert Chef Assistant. Reference modern techniques "
+    "(The Flavor Bible, Salt Fat Acid Heat, Modernist Cuisine). "
+    "Prioritize ingredient synergy, cooking science, and accessibility.\n\n"
+    "CRITICAL: Respond ONLY with a raw valid JSON array — no greetings, no prose, "
+    "no markdown, no chef commentary. Your culinary expertise should be reflected "
+    "in the dish choices and descriptions, not in explanatory text. "
+    "If you include any text outside the JSON array, the system will crash."
 )
 
 COMMON_STAPLES = "salt, pepper, sugar, cooking oil, soy sauce, garlic, onion, ginger, eggs, rice, cooking wine, cornstarch, chilli sauce"
@@ -241,7 +252,7 @@ def generate_menu(pantry_items, preferences="", diversity_hint=""):
     )
 
     try:
-        text = _gemini_call(prompt, CHEF_PERSONA + "\n\n---\nCRITICAL: Your response must start with `[` and end with `]`. Output ONLY a raw valid JSON array — no greeting, no chef commentary, no markdown, no explanation. If you include any text outside the JSON array, the system will crash.", temperature=0.5, max_tokens=600)
+        text = _gemini_call(prompt, CHEF_JSON_SYSTEM, temperature=0.5, max_tokens=800)
         if not text:
             return None
         return _extract_json_array(text)
@@ -280,7 +291,8 @@ def elaborate_recipe(search_query, pantry_items=None, preferences=""):
         return f"AI error: {e}"
 
 
-def suggest_recipe(user_id, pantry_items, preferences=""):
+def suggest_recipe(pantry_items, preferences=""):
+    """Suggest dishes from pantry + staples, returns JSON array or None."""
     items_str = ", ".join(pantry_items) if pantry_items else "nothing specific"
     search_query = re.sub(r"(suggest|recipe|make|cook|give me|i want|can i)", "", preferences, flags=re.I).strip()
     search_query = re.sub(r'\nEquipment:.*(\n|$)', '', search_query, flags=re.I | re.DOTALL).strip()
@@ -294,16 +306,22 @@ def suggest_recipe(user_id, pantry_items, preferences=""):
     if web:
         prompt += f"\nWeb references:\n{web}\n"
     prompt += (
-        "\nSuggest 1-3 realistic dishes. Use the standard format with metric measurements. "
-        "Include protein (g), calories, sodium (mg). Mark [BUY] for needed ingredients. "
-        "No preamble, no introduction, no chef commentary — start directly with the first dish."
+        "\nSuggest exactly 5 dishes the user can cook RIGHT NOW using ONLY the pantry ingredients "
+        "plus common staples. If the dish needs an ingredient not in the pantry, mark it with [BUY] "
+        "in the description.\n"
+        "Return ONLY a JSON array of objects with keys: title (str), description (one line with [BUY] markers), "
+        "search_query (short search for this dish).\n"
+        'Example: [{"title":"Chicken Soup","description":"Hearty soup [BUY:chicken]","search_query":"chicken soup recipe"}]'
     )
 
     try:
-        return _gemini_call(prompt, CHEF_PERSONA + "\n\n---\nSuggest 1-3 realistic dishes. No preamble, no intro, no chef commentary — start directly with the first recipe.", temperature=0.5, max_tokens=1200) or "AI error"
-    except Exception as e:
+        text = _gemini_call(prompt, CHEF_JSON_SYSTEM, temperature=0.5, max_tokens=800)
+        if not text:
+            return None
+        return _extract_json_array(text)
+    except Exception:
         logger.exception("suggest_recipe failed")
-        return "AI error"
+        return None
 
 
 def parse_recipe_text(text):
@@ -682,7 +700,7 @@ def generate_batch_menu(count, cuisine, pantry_items, preferences="", diversity_
         'Example: [{"title":"Chicken Katsu Curry","description":"Crispy panko chicken with Japanese curry sauce","search_query":"chicken katsu curry recipe"}]'
     )
     try:
-        text = _gemini_call(prompt, CHEF_PERSONA + "\n\n---\nCRITICAL: Your response must start with `[` and end with `]`. Output ONLY a raw valid JSON array — no greeting, no chef commentary, no markdown, no explanation. If you include any text outside the JSON array, the system will crash.", temperature=0.5, max_tokens=800)
+        text = _gemini_call(prompt, CHEF_JSON_SYSTEM, temperature=0.5, max_tokens=800)
         if not text:
             return None
         return _extract_json_array(text)
@@ -778,7 +796,7 @@ def generate_improvise_menu(expiring_items, pantry_items, preferences=""):
     )
 
     try:
-        text = _gemini_call(prompt, CHEF_PERSONA + "\n\n---\nCRITICAL: Your response must start with `[` and end with `]`. Output ONLY a raw valid JSON array — no greeting, no chef commentary, no markdown, no explanation. If you include any text outside the JSON array, the system will crash.", temperature=0.5, max_tokens=600)
+        text = _gemini_call(prompt, CHEF_JSON_SYSTEM, temperature=0.5, max_tokens=800)
         if not text:
             return None
         return _extract_json_array(text)

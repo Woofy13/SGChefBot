@@ -870,6 +870,37 @@ async def suggest_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]]
         await query.edit_message_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(buttons))
 
+    elif query.data == "canbake_again":
+        user_id = query.from_user.id
+        pantry = db.get_pantry_names(user_id)
+        if not pantry:
+            await query.edit_message_text("Your pantry is empty! Add items first.")
+            return
+        equip = db.get_user_preference(user_id, "equipment")
+        prev_pref = _last_preference.get(user_id, "")
+        pref = f"Equipment: {equip}.\n{prev_pref}" if equip else prev_pref
+        await query.edit_message_text("Thinking...")
+        seen = _menu_history.get(user_id, set())
+        hint = f"Absolutely do NOT suggest any of these dishes (already suggested before): {list(seen)}" if seen else ""
+        pref_with_hint = f"{pref}\n{hint}" if hint else pref
+        menu = ai.suggest_recipe(pantry, pref_with_hint)
+        _last_menu[user_id] = menu
+        if not menu:
+            await query.edit_message_text("Couldn't find recipes for your pantry. Try adding more items.")
+            return
+        _menu_history[user_id] = seen | {d["title"] for d in menu if d.get("title")}
+        lines = ["From your pantry:"]
+        for i, dish in enumerate(menu, 1):
+            lines.append(f"\n{i}. {dish.get('title', '?')}")
+            lines.append(f"   {dish.get('description', '')}")
+        buttons = [[
+            InlineKeyboardButton(str(i), callback_data=f"elaborate_{i-1}")
+            for i in range(1, len(menu) + 1)
+        ], [
+            InlineKeyboardButton("🔄 Regenerate", callback_data="canbake_again"),
+        ]]
+        await query.edit_message_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(buttons))
+
 
 async def elaborate_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1613,14 +1644,32 @@ async def canbake(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text("Your pantry is empty! Add items first.")
         return
 
-    items_str = ", ".join(pantry)
     msg = await update.effective_message.reply_text("Checking your pantry...")
     equip = db.get_user_preference(user_id, "equipment")
     pref = f"Equipment: {equip}.\n" if equip else ""
-    pref += "Suggest recipes I can cook RIGHT NOW using ONLY ingredients from this list plus common staples (salt, pepper, oil, sugar, garlic, onion, eggs, rice, soy sauce). Mark any [BUY] items I still need."
-    text = ai.suggest_recipe(user_id, pantry, pref)
-    text = text.replace("**", "")
-    await msg.edit_text(text)
+    pref += "Suggest recipes I can cook RIGHT NOW using ONLY ingredients from this list plus common staples."
+    menu = ai.suggest_recipe(pantry, pref)
+    _last_menu[user_id] = menu
+    _last_preference[user_id] = pref
+
+    if not menu:
+        await msg.edit_text("Couldn't find recipes for your pantry. Try adding more items.")
+        return
+
+    _menu_history[user_id] = {d["title"] for d in menu if d.get("title")}
+
+    lines = ["From your pantry:"]
+    for i, dish in enumerate(menu, 1):
+        lines.append(f"\n{i}. {dish.get('title', '?')}")
+        lines.append(f"   {dish.get('description', '')}")
+
+    buttons = [[
+        InlineKeyboardButton(str(i), callback_data=f"elaborate_{i-1}")
+        for i in range(1, len(menu) + 1)
+    ], [
+        InlineKeyboardButton("🔄 Regenerate", callback_data="canbake_again"),
+    ]]
+    await msg.edit_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(buttons))
 
 
 # --- Nutrition ---
