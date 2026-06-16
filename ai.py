@@ -3,6 +3,7 @@ import base64
 import re
 import time
 import logging
+import html
 import html.parser
 from datetime import date
 from openai import OpenAI, RateLimitError
@@ -812,30 +813,54 @@ def _format_iso_duration(dur):
     return " ".join(parts) if parts else dur
 
 
+def _clean_jsonld_text(text):
+    """Clean HTML entities and encoding corruption from JSON-LD text fields."""
+    text = html.unescape(text)
+    text = text.replace('\u2001', "'")
+    return text.strip()
+
+
+def _flatten_instructions(instructions):
+    """Recursively flatten HowToStep and HowToSection into a list of step strings."""
+    if isinstance(instructions, str):
+        return [_clean_jsonld_text(instructions)]
+    if not isinstance(instructions, list):
+        return []
+    steps = []
+    for entry in instructions:
+        if not isinstance(entry, dict):
+            steps.append(_clean_jsonld_text(str(entry)))
+            continue
+        etype = entry.get("@type", "")
+        if etype == "HowToSection":
+            name = entry.get("name", "")
+            if name:
+                steps.append(f"── {_clean_jsonld_text(name)} ──")
+            subs = entry.get("itemListElement", [])
+            if subs:
+                steps.extend(_flatten_instructions(subs))
+        else:
+            text = entry.get("text", "") or ""
+            steps.append(_clean_jsonld_text(text))
+    return steps
+
+
 def _format_jsonld_recipe(recipe):
-    title = recipe.get("name", "Imported Recipe")
+    title = _clean_jsonld_text(recipe.get("name", "Imported Recipe"))
 
     ingredients = recipe.get("recipeIngredient", [])
     if isinstance(ingredients, str):
         ingredients = [ingredients]
+    ingredients = [_clean_jsonld_text(i) for i in ingredients]
 
-    raw_instructions = recipe.get("recipeInstructions", [])
-    steps = []
-    if isinstance(raw_instructions, str):
-        steps = [raw_instructions]
-    elif isinstance(raw_instructions, list):
-        for step in raw_instructions:
-            if isinstance(step, dict):
-                steps.append(step.get("text", ""))
-            else:
-                steps.append(str(step))
+    steps = _flatten_instructions(recipe.get("recipeInstructions", []))
 
     nutrition = recipe.get("nutrition") or {}
-    n_cal = nutrition.get("calories", "")
-    n_protein = nutrition.get("proteinContent", "")
-    n_sodium = nutrition.get("sodiumContent", "")
+    n_cal = _clean_jsonld_text(nutrition.get("calories", ""))
+    n_protein = _clean_jsonld_text(nutrition.get("proteinContent", ""))
+    n_sodium = _clean_jsonld_text(nutrition.get("sodiumContent", ""))
     total_time = recipe.get("totalTime", "")
-    desc = recipe.get("description", "")
+    desc = _clean_jsonld_text(recipe.get("description", ""))
 
     lines = [f"**🍴 {title}**"]
     if total_time:
@@ -848,8 +873,13 @@ def _format_jsonld_recipe(recipe):
             lines.append(f"- {ing}")
     if steps:
         lines.append("\n**👨‍🍳 Step-by-Step Instructions**")
-        for i, step in enumerate(steps, 1):
-            lines.append(f"{i}. {step}")
+        counter = 0
+        for step in steps:
+            if step.startswith("── ") and step.endswith(" ──"):
+                lines.append(f"\n{step}")
+            else:
+                counter += 1
+                lines.append(f"{counter}. {step}")
     if n_cal or n_protein or n_sodium:
         parts = []
         if n_cal: parts.append(f"Calories: {n_cal}")

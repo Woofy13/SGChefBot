@@ -414,6 +414,21 @@ async def equipment(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
 
+async def addequipment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = _effective_user_id(update.effective_user.id)
+    if not context.args:
+        await update.message.reply_text("Example: /addequipment air fryer, rice cooker")
+        return
+    new_items = " ".join(context.args)
+    current = db.get_user_preference(user_id, "equipment") or ""
+    if current:
+        merged = current.rstrip(",.; ") + ", " + new_items
+    else:
+        merged = new_items
+    db.set_user_preference(user_id, "equipment", merged)
+    await update.message.reply_text(f"Added! Equipment: {merged}")
+
+
 async def diet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     args = context.args
@@ -2451,6 +2466,7 @@ def create_app(token: str):
     app.add_handler(CommandHandler("sort", sort_pantry))
     app.add_handler(CommandHandler("set", set_pref))
     app.add_handler(CommandHandler("equipment", equipment))
+    app.add_handler(CommandHandler("addequipment", addequipment))
     app.add_handler(CommandHandler("suggest", suggest))
     app.add_handler(CommandHandler("improvise", improvise))
     app.add_handler(CommandHandler("save", save_recipe))
