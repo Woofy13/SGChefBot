@@ -2090,7 +2090,8 @@ async def _handle_user_text(update, context, user_id, text):
         if is_question and first_word not in known_actions:
             msg = await update.effective_message.reply_text("Let me answer that...")
             answer = ai.recipe_followup(recipe, text)
-            await msg.edit_text(answer)
+            sanitized = _sanitize_markdown(answer)
+            await msg.edit_text(sanitized, parse_mode="Markdown")
             return
 
     # --- Route bare numbers to recipe view (before NL) ---
@@ -2304,7 +2305,8 @@ async def _handle_user_text(update, context, user_id, text):
         if recipe:
             await msg.edit_text("Let me answer that...")
             answer = ai.recipe_followup(recipe, text)
-            await msg.edit_text(answer)
+            sanitized = _sanitize_markdown(answer)
+            await msg.edit_text(sanitized, parse_mode="Markdown")
         else:
             await msg.edit_text(reply if reply else
                 "I can help manage your pantry, suggest recipes, track meals, and more! "
