@@ -224,7 +224,7 @@ def generate_menu(pantry_items, preferences="", diversity_hint=""):
     )
 
     try:
-        text = _gemini_call(prompt, "You are a chef. Respond with ONLY valid JSON. No explanations, no greetings, no markdown — just the raw JSON array.", temperature=0.5, max_tokens=600)
+        text = _gemini_call(prompt, CHEF_PERSONA + "\n\n---\nCRITICAL: Your response must start with `[` and end with `]`. Output ONLY a raw valid JSON array — no greeting, no chef commentary, no markdown, no explanation. If you include any text outside the JSON array, the system will crash.", temperature=0.5, max_tokens=600)
         if not text:
             return None
         text = text.strip()
@@ -672,7 +672,7 @@ def generate_batch_menu(count, cuisine, pantry_items, preferences="", diversity_
         'Example: [{"title":"Chicken Katsu Curry","description":"Crispy panko chicken with Japanese curry sauce","search_query":"chicken katsu curry recipe"}]'
     )
     try:
-        text = _gemini_call(prompt, "You are a chef. Respond with ONLY valid JSON. No explanations, no greetings, no markdown — just the raw JSON array.", temperature=0.5, max_tokens=800)
+        text = _gemini_call(prompt, CHEF_PERSONA + "\n\n---\nCRITICAL: Your response must start with `[` and end with `]`. Output ONLY a raw valid JSON array — no greeting, no chef commentary, no markdown, no explanation. If you include any text outside the JSON array, the system will crash.", temperature=0.5, max_tokens=800)
         if not text:
             return None
         text = text.strip()
@@ -774,7 +774,7 @@ def generate_improvise_menu(expiring_items, pantry_items, preferences=""):
     )
 
     try:
-        text = _gemini_call(prompt, "You are a chef focused on reducing food waste. Respond with ONLY valid JSON. No explanations, no greetings, no markdown — just the raw JSON array.", temperature=0.5, max_tokens=600)
+        text = _gemini_call(prompt, CHEF_PERSONA + "\n\n---\nCRITICAL: Your response must start with `[` and end with `]`. Output ONLY a raw valid JSON array — no greeting, no chef commentary, no markdown, no explanation. If you include any text outside the JSON array, the system will crash.", temperature=0.5, max_tokens=600)
         if not text:
             return None
         text = text.strip()
