@@ -2581,7 +2581,7 @@ async def random_ingredient(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text("Something went wrong. Try again later.")
         return
     if result == "AI error" or result.startswith("Something went wrong"):
-        await msg.edit_text("Gemini is temporarily unavailable (high demand). Try again in a moment.")
+        await msg.edit_text("Groq is temporarily unavailable (high demand). Try again in a moment.")
         return
     _last_suggestion[_effective_user_id(user_id)] = result
     keyboard = InlineKeyboardMarkup([
@@ -2602,7 +2602,7 @@ async def random_regenerate_callback(update: Update, context: ContextTypes.DEFAU
         await query.edit_message_text("Something went wrong. Try again later.")
         return
     if result == "AI error" or result.startswith("Something went wrong"):
-        await query.edit_message_text("Gemini is temporarily unavailable (high demand). Try again in a moment.")
+        await query.edit_message_text("Groq is temporarily unavailable (high demand). Try again in a moment.")
         return
     _last_suggestion[_effective_user_id(user_id)] = result
     keyboard = InlineKeyboardMarkup([
