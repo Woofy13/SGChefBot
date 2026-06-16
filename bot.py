@@ -2524,6 +2524,7 @@ async def random_ingredient(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _random_country[user_id] = country
     msg = await update.message.reply_text("Thinking..." if not country else f"Finding a {country} ingredient...")
     result = ai.suggest_random_ingredient(country)
+    _last_suggestion[_effective_user_id(user_id)] = result
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("🔄 Regenerate", callback_data="random_regenerate")],
     ])
@@ -2537,6 +2538,7 @@ async def random_regenerate_callback(update: Update, context: ContextTypes.DEFAU
     user_id = query.from_user.id
     country = _random_country.get(user_id, "")
     result = ai.suggest_random_ingredient(country)
+    _last_suggestion[_effective_user_id(user_id)] = result
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("🔄 Regenerate", callback_data="random_regenerate")],
     ])
