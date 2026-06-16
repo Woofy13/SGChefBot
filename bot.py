@@ -304,6 +304,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "  /equipment air fryer, oven       save your kitchen gear\n"
         "  /diet keto                       set a diet profile\n"
         "  /diet all                        reset to normal\n\n"
+        "*Household Sharing*\n\n"
+        "  /addmember <id>                  add a Telegram user to share pantry & shopping\n"
+        "  /removemember <id>               remove a household member\n"
+        "  /members                         list your household members\n\n"
         "You can also send voice messages and photos!"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
@@ -312,6 +316,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- Pantry ---
 
 async def add_pantry(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = _effective_user_id(update.effective_user.id)
     args = context.args
     if not args:
         await update.message.reply_text("Usage: `/add chicken, rice, broccoli`\nYou can also add expiry: `/add chicken 15/07/25`")
@@ -332,7 +337,7 @@ async def add_pantry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not clean_items:
         await update.message.reply_text("Could not identify items to add. Try: `/add chicken, rice`")
         return
-    db.add_pantry_items(update.effective_user.id, clean_items, expiry=expiry)
+    db.add_pantry_items(user_id, clean_items, expiry=expiry)
     reply = f"Added {len(clean_items)} item(s): {', '.join(clean_items)}"
     if expiry:
         reply += f" (exp {_fmt_date(expiry)})"
@@ -340,12 +345,12 @@ async def add_pantry(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def recategorize(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    db.recategorize_pantry(update.effective_user.id)
+    db.recategorize_pantry(_effective_user_id(update.effective_user.id))
     await update.message.reply_text("Recategorized all pantry items.")
 
 
 async def sort_pantry(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+    user_id = _effective_user_id(update.effective_user.id)
     _check_ai_limit(user_id)
     items = db.get_pantry(user_id)
     if not items:
@@ -447,12 +452,13 @@ async def export_recipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def remove_pantry(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = _effective_user_id(update.effective_user.id)
     args = context.args
     if not args:
         await update.message.reply_text("Usage: `/remove milk`", parse_mode="Markdown")
         return
     item = " ".join(args).strip().lower()
-    db.remove_pantry_item(update.effective_user.id, item)
+    db.remove_pantry_item(user_id, item)
     await update.message.reply_text(f"🗑️ Removed `{item}` from pantry", parse_mode="Markdown")
 
 
@@ -505,7 +511,7 @@ def _format_pantry_grouped(groups):
 
 
 async def show_pantry(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    groups = db.get_pantry_grouped(update.effective_user.id)
+    groups = db.get_pantry_grouped(_effective_user_id(update.effective_user.id))
     if not groups:
         await update.message.reply_text("Pantry is empty. Tell me what to add!")
         return
@@ -513,9 +519,10 @@ async def show_pantry(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def expiring(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = _effective_user_id(update.effective_user.id)
     args = context.args
     days = int(args[0]) if args else 30
-    items = db.get_expiring_items(update.effective_user.id, days)
+    items = db.get_expiring_items(user_id, days)
     if not items:
         await update.message.reply_text(f"✅ Nothing expiring in {days} days!")
         return
@@ -641,6 +648,11 @@ async def _do_suggest(update, context, user_id, pantry, pref):
         InlineKeyboardButton("🔄 Regenerate", callback_data="suggest_again"),
     ]]
     await msg.edit_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(buttons))
+
+
+def _effective_user_id(user_id):
+    primary = db.get_household_primary(user_id)
+    return primary if primary is not None else user_id
 
 
 def _sanitize_markdown(text):
@@ -1650,7 +1662,7 @@ async def weekly(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- Shopping ---
 
 async def shopping(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+    user_id = _effective_user_id(update.effective_user.id)
     _check_ai_limit(user_id)
     args = context.args
 
@@ -1709,7 +1721,7 @@ async def shopping(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def shop_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+    user_id = _effective_user_id(update.effective_user.id)
     args = context.args
     if not args:
         await update.message.reply_text("Usage: `/shop milk, eggs, chicken`")
@@ -1720,7 +1732,7 @@ async def shop_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def list_shopping(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+    user_id = _effective_user_id(update.effective_user.id)
     text, keyboard = _render_shopping_list(user_id)
     if not text:
         await update.message.reply_text("📋 Shopping list is empty. Use `/shop milk, eggs` to add items.")
@@ -1729,7 +1741,7 @@ async def list_shopping(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def shop_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+    user_id = _effective_user_id(update.effective_user.id)
     args = context.args
     if not args:
         await update.message.reply_text("Usage: `/shopremove milk`")
@@ -1740,15 +1752,64 @@ async def shop_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def shop_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+    user_id = _effective_user_id(update.effective_user.id)
     db.clear_shopping_list(user_id)
     await update.message.reply_text("🗑 Shopping list cleared.")
+
+
+# --- Household Sharing ---
+
+
+async def addmember(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    args = context.args
+    if not args:
+        await update.message.reply_text("Usage: `/addmember <telegram_id>`\n\nTell your household member to forward a message from the bot to you, or share their Telegram ID.")
+        return
+    try:
+        member_id = int(args[0])
+    except ValueError:
+        await update.message.reply_text("Invalid ID. Provide a numeric Telegram user ID.")
+        return
+    if member_id == user_id:
+        await update.message.reply_text("You can't add yourself as a member.")
+        return
+    db.add_household_member(user_id, member_id)
+    await update.message.reply_text(f"✅ Added Telegram ID `{member_id}` to your household. They can now use the shared shopping list and pantry.", parse_mode="Markdown")
+
+
+async def removemember(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    args = context.args
+    if not args:
+        await update.message.reply_text("Usage: `/removemember <telegram_id>`")
+        return
+    try:
+        member_id = int(args[0])
+    except ValueError:
+        await update.message.reply_text("Invalid ID. Provide a numeric Telegram user ID.")
+        return
+    db.remove_household_member(user_id, member_id)
+    await update.message.reply_text(f"🗑 Removed Telegram ID `{member_id}` from your household.", parse_mode="Markdown")
+
+
+async def members(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    rows = db.get_household_members(user_id)
+    if not rows:
+        await update.message.reply_text("No household members. Use `/addmember <telegram_id>` to add one.")
+        return
+    lines = ["👨‍👩‍👧‍👦 *Household Members*"]
+    for r in rows:
+        lines.append(f"• `{r['member_user_id']}` (added {r['added_date']})")
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
 # --- Natural language handler ---
 
 async def _handle_user_text(update, context, user_id, text):
     """Core text processing logic used by both handle_text and handle_voice."""
+    user_id = _effective_user_id(user_id)
     pantry = db.get_pantry_names(user_id)
     recipes = db.get_recipes(user_id)
 
@@ -2228,7 +2289,7 @@ def _render_shopping_list(user_id):
 async def shop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    user_id = query.from_user.id
+    user_id = _effective_user_id(query.from_user.id)
     data = query.data
     if data.startswith("shop_toggle_"):
         idx = int(data.split("_")[2])
@@ -2248,7 +2309,7 @@ async def shop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def receipt_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    user_id = query.from_user.id
+    user_id = _effective_user_id(query.from_user.id)
     data = _receipt_items.pop(user_id, None)
     if not data or not data["items"]:
         await query.edit_message_text("Nothing to add.")
@@ -2309,6 +2370,9 @@ def create_app(token: str):
     app.add_handler(CommandHandler("list", list_shopping))
     app.add_handler(CommandHandler("shopremove", shop_remove))
     app.add_handler(CommandHandler("shopclear", shop_clear))
+    app.add_handler(CommandHandler("addmember", addmember))
+    app.add_handler(CommandHandler("removemember", removemember))
+    app.add_handler(CommandHandler("members", members))
     app.add_handler(CommandHandler("diet", diet))
     app.add_handler(CommandHandler("expiryremind", expiry_remind))
     app.add_handler(CommandHandler("export", export_recipe))

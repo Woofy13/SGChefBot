@@ -149,6 +149,16 @@ def _init_sqlite():
     except Exception:
         pass
 
+    try:
+        _execute(conn, """
+            CREATE TABLE IF NOT EXISTS household_members (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                primary_user_id INTEGER NOT NULL,
+                member_user_id INTEGER NOT NULL UNIQUE,
+                added_date TEXT DEFAULT (date('now')),
+                UNIQUE(primary_user_id, member_user_id)
+            )
+        """)
     except Exception:
         pass
     for idx in [
@@ -242,6 +252,15 @@ def _init_pg():
             user_id INTEGER NOT NULL,
             dish_name TEXT NOT NULL,
             cooked_date TEXT DEFAULT (CURRENT_DATE)
+        );
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS household_members (
+            id SERIAL PRIMARY KEY,
+            primary_user_id INTEGER NOT NULL,
+            member_user_id INTEGER NOT NULL UNIQUE,
+            added_date TEXT DEFAULT (CURRENT_DATE),
+            UNIQUE(primary_user_id, member_user_id)
         );
     """)
     for idx in [
@@ -764,3 +783,39 @@ def clear_cooking_log(user_id):
     _execute(conn, _q("DELETE FROM cooking_log WHERE user_id = ?"), (user_id,))
     _commit(conn)
     _close(conn)
+
+
+# --- Household Members ---
+
+
+def add_household_member(primary_user_id, member_user_id):
+    conn = get_connection()
+    _execute(conn,
+        _q("INSERT INTO household_members (primary_user_id, member_user_id) VALUES (?, ?) ON CONFLICT(member_user_id) DO UPDATE SET primary_user_id = excluded.primary_user_id"),
+        (primary_user_id, member_user_id),
+    )
+    _commit(conn)
+    _close(conn)
+
+
+def remove_household_member(primary_user_id, member_user_id):
+    conn = get_connection()
+    _execute(conn, _q("DELETE FROM household_members WHERE primary_user_id = ? AND member_user_id = ?"), (primary_user_id, member_user_id))
+    _commit(conn)
+    _close(conn)
+
+
+def get_household_primary(member_user_id):
+    conn = get_connection()
+    cur = _execute(conn, _q("SELECT primary_user_id FROM household_members WHERE member_user_id = ?"), (member_user_id,))
+    row = _fetchone(cur)
+    _close(conn)
+    return row["primary_user_id"] if row else None
+
+
+def get_household_members(primary_user_id):
+    conn = get_connection()
+    cur = _execute(conn, _q("SELECT member_user_id, added_date FROM household_members WHERE primary_user_id = ? ORDER BY added_date"), (primary_user_id,))
+    rows = _fetchall(cur)
+    _close(conn)
+    return rows
