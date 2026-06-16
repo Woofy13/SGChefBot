@@ -1031,7 +1031,7 @@ def suggest_random_ingredient(country=""):
         return _groq_call(
             prompt,
             system,
-            model=GROQ_QUALITY_MODEL, temperature=0.9, max_tokens=800,
+            model=None, temperature=0.9, max_tokens=1200,
         ) or "AI error"
     except Exception as e:
         logger.exception("suggest_random_ingredient failed")
