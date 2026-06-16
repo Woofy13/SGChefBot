@@ -1305,8 +1305,9 @@ async def view_recipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
          InlineKeyboardButton("📤 Export", callback_data="export_last"),
          InlineKeyboardButton("✅ Cooked!", callback_data="cooked")],
     ])
+    msg = await update.message.reply_text("Loading recipe...")
     sanitized = _sanitize_markdown(text)
-    await update.message.reply_text(sanitized, parse_mode="Markdown", reply_markup=keyboard)
+    await _send_long_message(None, msg, sanitized, keyboard)
 
 
 async def delete_recipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1369,8 +1370,9 @@ async def view_recipe_callback(update: Update, context: ContextTypes.DEFAULT_TYP
              InlineKeyboardButton("📤 Export", callback_data="export_last"),
              InlineKeyboardButton("✅ Cooked!", callback_data="cooked")],
         ])
+        msg = await query.message.reply_text("Loading recipe...")
         sanitized = _sanitize_markdown(text)
-        await query.message.reply_text(sanitized, parse_mode="Markdown", reply_markup=keyboard)
+        await _send_long_message(None, msg, sanitized, keyboard)
     else:
         await query.message.reply_text("Recipe not found.")
 
