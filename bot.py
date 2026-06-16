@@ -2515,8 +2515,9 @@ async def receipt_confirm_callback(update: Update, context: ContextTypes.DEFAULT
 
 async def random_ingredient(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _check_ai_limit(update.effective_user.id)
-    msg = await update.message.reply_text("Thinking...")
-    result = ai.suggest_random_ingredient()
+    country = " ".join(context.args).strip() if context.args else ""
+    msg = await update.message.reply_text("Thinking..." if not country else f"Finding a {country} ingredient...")
+    result = ai.suggest_random_ingredient(country)
     await msg.edit_text(result)
 
 
