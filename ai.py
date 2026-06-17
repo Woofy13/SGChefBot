@@ -62,7 +62,7 @@ def _extract_json_array(text):
     raise ValueError("No JSON array found in response")
 
 
-def _groq_call(prompt, system_msg, temperature=0.5, max_tokens=600):
+def _groq_call(prompt, system_msg, temperature=0.5, max_tokens=600, return_usage=False):
     global _daily_count, _daily_date
 
     today = date.today()
@@ -86,6 +86,10 @@ def _groq_call(prompt, system_msg, temperature=0.5, max_tokens=600):
             _daily_count += 1
             text = resp.choices[0].message.content
             text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
+            usage = resp.usage
+            logger.info("Tokens: %d prompt + %d completion = %d total", usage.prompt_tokens, usage.completion_tokens, usage.total_tokens)
+            if return_usage:
+                return text, {"prompt": usage.prompt_tokens, "completion": usage.completion_tokens, "total": usage.total_tokens}
             return text
         except Exception as e:
             err_str = str(e)
@@ -283,8 +287,11 @@ def elaborate_recipe(search_query, pantry_items=None, preferences=""):
     )
 
     try:
-        result = _groq_call(prompt, CHEF_PERSONA + "\n\n---\n\nWrite detailed, practical recipes using the format provided.", temperature=0.5, max_tokens=2500)
-        return result or "AI error: No response"
+        result, usage = _groq_call(prompt, CHEF_PERSONA + "\n\n---\n\nWrite detailed, practical recipes using the format provided.", temperature=0.5, max_tokens=2500, return_usage=True)
+        if not result:
+            return "AI error: No response"
+        result += f"\n\n*— {usage['total']} tokens used —*"
+        return result
     except Exception as e:
         logger.exception("elaborate_recipe failed")
         return f"AI error: {e}"
