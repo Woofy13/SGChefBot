@@ -634,14 +634,13 @@ def generate_shopping_list(recipe_title, missing_ingredients):
 def substitute_ingredient(recipe_text, substitution_text):
     prompt = (
         f"Here is the current recipe:\n{recipe_text}\n\n"
-        f"The user wants to make this substitution: {substitution_text}\n\n"
-        "Return the FULL updated recipe with the substitution applied. "
-        "Adjust quantities, cooking times, and techniques where needed. "
-        "Add a note explaining the key changes. "
-        "Keep the same format as the original recipe with all sections."
+        f"The user asks: {substitution_text}\n\n"
+        "Answer concisely whether the substitution works, what differences it will make "
+        "(taste, texture, cook time), and any adjustments needed. "
+        "Do NOT reprint the full recipe. Just answer the question."
     )
     try:
-        return _ai_call(prompt, CHEF_PERSONA + "\n\n---\n\nModify the recipe with the requested substitution. Return the FULL updated recipe.", temperature=0.5, max_tokens=2500) or "AI error"
+        return _ai_call(prompt, CHEF_PERSONA + "\n\n---\n\nAnswer concisely whether the substitution works. Do NOT reprint the recipe.", temperature=0.5, max_tokens=600) or "AI error"
     except Exception as e:
         logger.exception("substitute_ingredient failed")
         return "AI error"
