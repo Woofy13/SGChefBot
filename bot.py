@@ -49,6 +49,7 @@ _batch_export = {}  # user_id -> {"step": "awaiting_input"}
 
 # Random ingredient country tracker
 _random_country = {}  # user_id -> country string
+_random_shown = {}  # user_id -> set of ingredient names already shown
 
 # Photo tracking
 _photo_counts = {}  # user_id -> date
@@ -2569,6 +2570,11 @@ async def receipt_confirm_callback(update: Update, context: ContextTypes.DEFAULT
     await query.edit_message_text(f"\u2705 Added {len(added)} item(s) to pantry: {', '.join(added)}")
 
 
+def _extract_ingredient_name(text):
+    m = re.search(r'\*\*🛒 Ingredient:\*\*\s*(.+?)(?:\n|$)', text)
+    return m.group(1).strip().lower() if m else ""
+
+
 async def random_ingredient(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _check_ai_limit(update.effective_user.id)
     user_id = update.effective_user.id
@@ -2583,6 +2589,9 @@ async def random_ingredient(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if result == "AI error" or result.startswith("Something went wrong"):
         await msg.edit_text("AI is temporarily unavailable (high demand). Try again in a moment.")
         return
+    name = _extract_ingredient_name(result)
+    if name:
+        _random_shown.setdefault(user_id, set()).add(name)
     _last_suggestion[_effective_user_id(user_id)] = result
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("🔄 Regenerate", callback_data="random_regenerate")],
@@ -2596,20 +2605,29 @@ async def random_regenerate_callback(update: Update, context: ContextTypes.DEFAU
     await query.answer()
     user_id = query.from_user.id
     country = _random_country.get(user_id, "")
-    try:
-        result = ai.suggest_random_ingredient(country)
-    except Exception as e:
-        await query.edit_message_text("Something went wrong. Try again later.")
-        return
-    if result == "AI error" or result.startswith("Something went wrong"):
-        await query.edit_message_text("AI is temporarily unavailable (high demand). Try again in a moment.")
-        return
-    _last_suggestion[_effective_user_id(user_id)] = result
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔄 Regenerate", callback_data="random_regenerate")],
-    ])
-    sanitized = _sanitize_markdown(result)
-    await query.edit_message_text(sanitized, parse_mode="Markdown", reply_markup=keyboard)
+    exclude = list(_random_shown.get(user_id, set()))
+
+    for attempt in range(4):
+        try:
+            result = ai.suggest_random_ingredient(country, exclude)
+        except Exception as e:
+            await query.edit_message_text("Something went wrong. Try again later.")
+            return
+        if result == "AI error" or result.startswith("Something went wrong"):
+            await query.edit_message_text("AI is temporarily unavailable (high demand). Try again in a moment.")
+            return
+        name = _extract_ingredient_name(result)
+        if name and name not in exclude:
+            _random_shown.setdefault(user_id, set()).add(name)
+            _last_suggestion[_effective_user_id(user_id)] = result
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 Regenerate", callback_data="random_regenerate")],
+            ])
+            sanitized = _sanitize_markdown(result)
+            await query.edit_message_text(sanitized, parse_mode="Markdown", reply_markup=keyboard)
+            return
+
+    await query.edit_message_text("Couldn't find a new ingredient. Try again later.")
 
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):

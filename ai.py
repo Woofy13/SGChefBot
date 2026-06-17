@@ -1031,17 +1031,23 @@ def parse_cook_recipe(recipe_text):
 
 # --- Random Ingredient ---
 
-def suggest_random_ingredient(country=""):
+def suggest_random_ingredient(country="", exclude=None):
     reality_check = (
         "CRITICAL: Only suggest ingredients that are 100% real and verifiable. "
         "Never invent or hallucinate ingredients. If you are unsure whether something exists, do not suggest it. "
         "Stick to well-known real ingredients like gochujang, sumac, yuzu kosho, harissa, black garlic, "
         "kecap manis, shrimp paste, miso, preserved lemon, za'atar, fish sauce, furikake, etc. "
     )
+    exclude_block = ""
+    if exclude:
+        exclude_block = "The following ingredients have already been shown. You MUST NOT suggest any of them:\n" + \
+            "\n".join(f"- {x}" for x in exclude) + \
+            "\n\nPick something completely different.\n\n"
     if country:
         prompt = (
             f"Suggest a single random, unusual ingredient or food item from {country} cuisine. "
             f"{reality_check}"
+            f"{exclude_block}"
             "It should be authentic, interesting, and something a home cook might not have tried before. "
             "Lean toward unique spices, fermented items, pastes, condiments, and seasonings — "
             "the more aromatic and flavourful, the better. "
@@ -1056,6 +1062,7 @@ def suggest_random_ingredient(country=""):
         prompt = (
             "Suggest a single random, unusual, quirky ingredient available in Singapore. "
             f"{reality_check}"
+            f"{exclude_block}"
             "Think outside the box — unique spices, pastes, fermented items, sauces, condiments, "
             "preserved ingredients, and aromatic seasonings. Avoid basic fruits and vegetables. "
             "Return ONLY the ingredient info in exactly this format — no extra commentary:\n\n"
