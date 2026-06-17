@@ -334,7 +334,7 @@ def suggest_recipe(pantry_items, preferences=""):
     )
 
     try:
-        text = _ai_call(prompt, CHEF_JSON_SYSTEM, temperature=0.5, max_tokens=800)
+        text = _ai_call(prompt, CHEF_JSON_SYSTEM, temperature=0.5, max_tokens=1500)
         if not text:
             return None
         return _extract_json_array(text)
@@ -711,7 +711,7 @@ def generate_batch_menu(count, cuisine, pantry_items, preferences="", diversity_
         'Example: [{"title":"Chicken Katsu Curry","description":"Crispy panko chicken with Japanese curry sauce","search_query":"chicken katsu curry recipe"}]'
     )
     try:
-        text = _ai_call(prompt, CHEF_JSON_SYSTEM, temperature=0.5, max_tokens=800)
+        text = _ai_call(prompt, CHEF_JSON_SYSTEM, temperature=0.5, max_tokens=1500)
         if not text:
             return None
         return _extract_json_array(text)
@@ -807,7 +807,7 @@ def generate_improvise_menu(expiring_items, pantry_items, preferences=""):
     )
 
     try:
-        text = _ai_call(prompt, CHEF_JSON_SYSTEM, temperature=0.5, max_tokens=800)
+        text = _ai_call(prompt, CHEF_JSON_SYSTEM, temperature=0.5, max_tokens=1500)
         if not text:
             return None
         return _extract_json_array(text)
