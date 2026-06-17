@@ -265,7 +265,7 @@ def generate_menu(pantry_items, preferences="", diversity_hint=""):
     )
 
     try:
-        text = _ai_call(prompt, CHEF_JSON_SYSTEM, temperature=0.5, max_tokens=1500)
+        text = _ai_call(prompt, CHEF_JSON_SYSTEM, temperature=0.5, max_tokens=2500)
         if not text:
             return None
         return _extract_json_array(text)
