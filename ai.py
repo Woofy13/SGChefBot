@@ -468,7 +468,7 @@ def process_natural_language(user_message, pantry_items=None, recipes=None):
     try:
         text = _ai_call(prompt, "You are a kitchen assistant. Reply only in JSON.", temperature=0.1, max_tokens=200)
         if not text:
-            return {"action": "chat", "items": [], "message": "Sorry, I couldn't process that. Try again."}
+            text = ""
         text = text.strip()
         text = text.replace("```json", "").replace("```", "").strip()
         start, end = text.find("{"), text.rfind("}")
