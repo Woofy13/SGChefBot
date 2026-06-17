@@ -586,7 +586,7 @@ def recipe_followup(recipe_text, user_question):
         "Reference the recipe details in your answer. Keep it concise."
     )
     try:
-        return _ai_call(prompt, CHEF_PERSONA + "\n\n---\n\nAnswer the user's question about the current recipe. Be helpful and specific.", temperature=0.5, max_tokens=600) or "AI error"
+        return _ai_call(prompt, CHEF_PERSONA + "\n\n---\n\nAnswer the user's question about the current recipe. Be helpful and specific.", temperature=0.5, max_tokens=4000) or "AI error"
     except Exception as e:
         logger.exception("recipe_followup failed")
         return "AI error"
