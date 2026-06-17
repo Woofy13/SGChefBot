@@ -2605,29 +2605,23 @@ async def random_regenerate_callback(update: Update, context: ContextTypes.DEFAU
     await query.answer()
     user_id = query.from_user.id
     country = _random_country.get(user_id, "")
-    exclude = list(_random_shown.get(user_id, set()))
-
-    for attempt in range(4):
-        try:
-            result = ai.suggest_random_ingredient(country, exclude)
-        except Exception as e:
-            await query.edit_message_text("Something went wrong. Try again later.")
-            return
-        if result == "AI error" or result.startswith("Something went wrong"):
-            await query.edit_message_text("AI is temporarily unavailable (high demand). Try again in a moment.")
-            return
-        name = _extract_ingredient_name(result)
-        if name and name not in exclude:
-            _random_shown.setdefault(user_id, set()).add(name)
-            _last_suggestion[_effective_user_id(user_id)] = result
-            keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔄 Regenerate", callback_data="random_regenerate")],
-            ])
-            sanitized = _sanitize_markdown(result)
-            await query.edit_message_text(sanitized, parse_mode="Markdown", reply_markup=keyboard)
-            return
-
-    await query.edit_message_text("Couldn't find a new ingredient. Try again later.")
+    try:
+        result = ai.suggest_random_ingredient(country, list(_random_shown.get(user_id, set())))
+    except Exception as e:
+        await query.edit_message_text("Something went wrong. Try again later.")
+        return
+    if result == "AI error" or result.startswith("Something went wrong"):
+        await query.edit_message_text("AI is temporarily unavailable (high demand). Try again in a moment.")
+        return
+    name = _extract_ingredient_name(result)
+    if name:
+        _random_shown.setdefault(user_id, set()).add(name)
+    _last_suggestion[_effective_user_id(user_id)] = result
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 Regenerate", callback_data="random_regenerate")],
+    ])
+    sanitized = _sanitize_markdown(result)
+    await query.edit_message_text(sanitized, parse_mode="Markdown", reply_markup=keyboard)
 
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
