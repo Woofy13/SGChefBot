@@ -640,7 +640,7 @@ def substitute_ingredient(recipe_text, substitution_text):
         "Do NOT reprint the full recipe. Just answer the question."
     )
     try:
-        return _ai_call(prompt, CHEF_PERSONA + "\n\n---\n\nAnswer concisely whether the substitution works. Do NOT reprint the recipe.", temperature=0.5, max_tokens=600) or "AI error"
+        return _ai_call(prompt, CHEF_PERSONA + "\n\n---\n\nAnswer concisely whether the substitution works. Do NOT reprint the recipe.", temperature=0.5, max_tokens=2500) or "AI error"
     except Exception as e:
         logger.exception("substitute_ingredient failed")
         return "AI error"
