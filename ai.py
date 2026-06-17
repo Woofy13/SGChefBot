@@ -1043,6 +1043,10 @@ def suggest_random_ingredient(country="", exclude=None):
         exclude_block = "The following ingredients have already been shown. You MUST NOT suggest any of them:\n" + \
             "\n".join(f"- {x}" for x in exclude) + \
             "\n\nPick something completely different.\n\n"
+        exclude_block += (
+            "If you cannot think of ANY new ingredient that isn't in the exclude list, "
+            "respond ONLY with exactly: NO_INGREDIENTS_LEFT\n\n"
+        )
     if country:
         prompt = (
             f"Suggest a single random, unusual ingredient or food item from {country} cuisine. "

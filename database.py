@@ -594,6 +594,18 @@ def get_all_preferences(user_id):
     return {r["key"]: r["value"] for r in rows}
 
 
+def get_called_ingredients(user_id):
+    val = get_user_preference(user_id, "called_ingredients")
+    return json.loads(val) if val else []
+
+
+def add_called_ingredient(user_id, name):
+    ingredients = get_called_ingredients(user_id)
+    if name not in ingredients:
+        ingredients.append(name)
+        set_user_preference(user_id, "called_ingredients", json.dumps(ingredients))
+
+
 # --- User Goals ---
 
 def get_goals(user_id):

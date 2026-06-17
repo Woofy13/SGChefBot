@@ -12,8 +12,8 @@ sys.path.insert(0, os.path.dirname(__file__))
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-from config import TELEGRAM_BOT_TOKEN, DEEPSEEK_API_KEY
-from database import init_db
+from config import TELEGRAM_BOT_TOKEN, DEEPSEEK_API_KEY, OWNER_TELEGRAM_ID
+from database import init_db, add_called_ingredient
 from bot import create_app
 
 
@@ -73,6 +73,8 @@ def main():
     reminder_thread.start()
 
     init_db()
+    for ing in ["Cincalok", "Belacan", "Bubu"]:
+        add_called_ingredient(OWNER_TELEGRAM_ID, ing)
     print("Database initialized")
 
     app = create_app(TELEGRAM_BOT_TOKEN)
