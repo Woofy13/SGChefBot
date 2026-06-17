@@ -265,7 +265,7 @@ def generate_menu(pantry_items, preferences="", diversity_hint=""):
     )
 
     try:
-        text = _ai_call(prompt, CHEF_JSON_SYSTEM, temperature=0.5, max_tokens=2500)
+        text = _ai_call(prompt, CHEF_JSON_SYSTEM, temperature=0.5, max_tokens=4000)
         if not text:
             return None
         return _extract_json_array(text)
@@ -297,7 +297,7 @@ def elaborate_recipe(search_query, pantry_items=None, preferences=""):
     )
 
     try:
-        result, usage = _ai_call(prompt, CHEF_PERSONA + "\n\n---\n\nWrite detailed, practical recipes using the format provided.", temperature=0.5, max_tokens=2500, return_usage=True)
+        result, usage = _ai_call(prompt, CHEF_PERSONA + "\n\n---\n\nWrite detailed, practical recipes using the format provided.", temperature=0.5, max_tokens=4000, return_usage=True)
         if not result:
             return "AI error: No response"
         result += f"\n\n*— {usage['total']} tokens used —*"
@@ -334,7 +334,7 @@ def suggest_recipe(pantry_items, preferences=""):
     )
 
     try:
-        text = _ai_call(prompt, CHEF_JSON_SYSTEM, temperature=0.5, max_tokens=2500)
+        text = _ai_call(prompt, CHEF_JSON_SYSTEM, temperature=0.5, max_tokens=4000)
         if not text:
             return None
         return _extract_json_array(text)
@@ -410,7 +410,7 @@ def get_nutrition(food_name):
         "carbs_g, fat_g, sodium_mg. Use realistic averages."
     )
     try:
-        text = _ai_call(prompt, "You are a nutritionist. Respond only with JSON.", temperature=0.3, max_tokens=300)
+        text = _ai_call(prompt, "You are a nutritionist. Respond only with JSON.", temperature=0.3, max_tokens=1000)
         if not text:
             return None
         text = text.strip()
@@ -640,7 +640,7 @@ def substitute_ingredient(recipe_text, substitution_text):
         "Do NOT reprint the full recipe. Just answer the question."
     )
     try:
-        return _ai_call(prompt, CHEF_PERSONA + "\n\n---\n\nAnswer concisely whether the substitution works. Do NOT reprint the recipe.", temperature=0.5, max_tokens=2500) or "AI error"
+        return _ai_call(prompt, CHEF_PERSONA + "\n\n---\n\nAnswer concisely whether the substitution works. Do NOT reprint the recipe.", temperature=0.5, max_tokens=4000) or "AI error"
     except Exception as e:
         logger.exception("substitute_ingredient failed")
         return "AI error"
@@ -658,7 +658,7 @@ def scale_recipe(recipe_text, factor, target_servings=None):
         "Keep the same format with all sections."
     )
     try:
-        return _ai_call(prompt, CHEF_PERSONA + "\n\n---\n\nScale the recipe accurately. Return the FULL updated recipe with all ingredient quantities rescaled.", temperature=0.5, max_tokens=2500) or "AI error"
+        return _ai_call(prompt, CHEF_PERSONA + "\n\n---\n\nScale the recipe accurately. Return the FULL updated recipe with all ingredient quantities rescaled.", temperature=0.5, max_tokens=4000) or "AI error"
     except Exception as e:
         logger.exception("scale_recipe failed")
         return "AI error"
@@ -710,7 +710,7 @@ def generate_batch_menu(count, cuisine, pantry_items, preferences="", diversity_
         'Example: [{"title":"Chicken Katsu Curry","description":"Crispy panko chicken with Japanese curry sauce","search_query":"chicken katsu curry recipe"}]'
     )
     try:
-        text = _ai_call(prompt, CHEF_JSON_SYSTEM, temperature=0.5, max_tokens=2500)
+        text = _ai_call(prompt, CHEF_JSON_SYSTEM, temperature=0.5, max_tokens=4000)
         if not text:
             return None
         return _extract_json_array(text)
@@ -806,7 +806,7 @@ def generate_improvise_menu(expiring_items, pantry_items, preferences=""):
     )
 
     try:
-        text = _ai_call(prompt, CHEF_JSON_SYSTEM, temperature=0.5, max_tokens=2500)
+        text = _ai_call(prompt, CHEF_JSON_SYSTEM, temperature=0.5, max_tokens=4000)
         if not text:
             return None
         return _extract_json_array(text)
@@ -977,7 +977,7 @@ def import_recipe_from_url(url):
         return _ai_call(
             prompt,
             CHEF_PERSONA + "\n\n---\n\nExtract the complete recipe from the web page content. Return only the recipe in the requested format.",
-            temperature=0.3, max_tokens=2500,
+            temperature=0.3, max_tokens=4000,
         )
     except Exception:
         logger.exception("import_recipe_from_url: LLM extraction failed")
@@ -1087,7 +1087,7 @@ def suggest_random_ingredient(country="", exclude=None):
     try:
         return _ai_call(
             prompt, system,
-            temperature=0.9, max_tokens=1200,
+            temperature=0.9, max_tokens=4000,
         ) or "AI error"
     except Exception as e:
         logger.exception("suggest_random_ingredient failed")
