@@ -2688,7 +2688,7 @@ def create_app(token: str):
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CallbackQueryHandler(cooked_callback, pattern=r"^(cooked|cooked_\d+)$"))
     app.add_handler(CallbackQueryHandler(stats_callback, pattern="^(stats_|reset_stats_|stats_back)"))
-    app.add_handler(CallbackQueryHandler(suggest_callback, pattern="^(save_last|suggest_again|export_last)$"))
+    app.add_handler(CallbackQueryHandler(suggest_callback, pattern="^(save_last|suggest_again|export_last|canbake_again)$"))
     app.add_handler(CallbackQueryHandler(batch_callback, pattern="^batch_"))
     app.add_handler(CallbackQueryHandler(cook_callback, pattern="^cook_next$"))
     app.add_handler(CallbackQueryHandler(cook_done_callback, pattern="^cook_done$"))
