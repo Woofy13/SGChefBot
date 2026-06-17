@@ -8,9 +8,15 @@ import html.parser
 from datetime import date
 from openai import OpenAI
 from ddgs import DDGS
-from config import GROQ_API_KEY, GROQ_MODEL, GROQ_VISION_MODEL, OWNER_TELEGRAM_ID
+from config import GROQ_API_KEY, GROQ_VISION_MODEL, DEEPSEEK_API_KEY, DEEPSEEK_MODEL, OWNER_TELEGRAM_ID
 
 client = OpenAI(
+    api_key=DEEPSEEK_API_KEY,
+    base_url="https://api.deepseek.com",
+    max_retries=0,
+)
+
+groq_client = OpenAI(
     api_key=GROQ_API_KEY,
     base_url="https://api.groq.com/openai/v1",
     max_retries=0,
@@ -62,7 +68,9 @@ def _extract_json_array(text):
     raise ValueError("No JSON array found in response")
 
 
-def _groq_call(prompt, system_msg, temperature=0.5, max_tokens=600, return_usage=False):
+MAX_TOKENS_CAP = 10000
+
+def _ai_call(prompt, system_msg, temperature=0.5, max_tokens=600, return_usage=False):
     global _daily_count, _daily_date
 
     today = date.today()
@@ -71,14 +79,16 @@ def _groq_call(prompt, system_msg, temperature=0.5, max_tokens=600, return_usage
         _daily_date = today
 
     if _daily_count >= DAILY_LIMIT:
-        raise RuntimeError("Groq daily request limit reached (~1,500). Try again after midnight UTC.")
+        raise RuntimeError("AI daily request limit reached (~1,500). Try again after midnight UTC.")
+
+    max_tokens = min(max_tokens, MAX_TOKENS_CAP)
 
     msg = [{"role": "system", "content": system_msg}, {"role": "user", "content": prompt}]
 
     for attempt in range(4):
         try:
             resp = client.chat.completions.create(
-                model=GROQ_MODEL,
+                model=DEEPSEEK_MODEL,
                 messages=msg,
                 temperature=temperature,
                 max_tokens=max_tokens,
@@ -97,13 +107,13 @@ def _groq_call(prompt, system_msg, temperature=0.5, max_tokens=600, return_usage
                 if attempt < 3:
                     time.sleep(5)
                     continue
-                raise RuntimeError("Groq daily request limit reached (~1,500). Try again after midnight UTC.")
+                raise RuntimeError("AI daily request limit reached (~1,500). Try again after midnight UTC.")
             if "503" in err_str or "UNAVAILABLE" in err_str or "500" in err_str:
                 if attempt < 3:
                     wait = 10 * (attempt + 1)
                     time.sleep(wait)
                     continue
-                raise RuntimeError("Groq is temporarily unavailable (high demand). Please try again in a moment.")
+                raise RuntimeError("AI is temporarily unavailable (high demand). Please try again in a moment.")
             if attempt < 3:
                 time.sleep(3)
                 continue
@@ -255,7 +265,7 @@ def generate_menu(pantry_items, preferences="", diversity_hint=""):
     )
 
     try:
-        text = _groq_call(prompt, CHEF_JSON_SYSTEM, temperature=0.5, max_tokens=1500)
+        text = _ai_call(prompt, CHEF_JSON_SYSTEM, temperature=0.5, max_tokens=1500)
         if not text:
             return None
         return _extract_json_array(text)
@@ -287,7 +297,7 @@ def elaborate_recipe(search_query, pantry_items=None, preferences=""):
     )
 
     try:
-        result, usage = _groq_call(prompt, CHEF_PERSONA + "\n\n---\n\nWrite detailed, practical recipes using the format provided.", temperature=0.5, max_tokens=2500, return_usage=True)
+        result, usage = _ai_call(prompt, CHEF_PERSONA + "\n\n---\n\nWrite detailed, practical recipes using the format provided.", temperature=0.5, max_tokens=2500, return_usage=True)
         if not result:
             return "AI error: No response"
         result += f"\n\n*— {usage['total']} tokens used —*"
@@ -324,7 +334,7 @@ def suggest_recipe(pantry_items, preferences=""):
     )
 
     try:
-        text = _groq_call(prompt, CHEF_JSON_SYSTEM, temperature=0.5, max_tokens=800)
+        text = _ai_call(prompt, CHEF_JSON_SYSTEM, temperature=0.5, max_tokens=800)
         if not text:
             return None
         return _extract_json_array(text)
@@ -400,7 +410,7 @@ def get_nutrition(food_name):
         "carbs_g, fat_g, sodium_mg. Use realistic averages."
     )
     try:
-        text = _groq_call(prompt, "You are a nutritionist. Respond only with JSON.", temperature=0.3, max_tokens=300)
+        text = _ai_call(prompt, "You are a nutritionist. Respond only with JSON.", temperature=0.3, max_tokens=300)
         if not text:
             return None
         text = text.strip()
@@ -420,7 +430,7 @@ def meal_nutrition(meal_description):
         "Return ONLY JSON with keys: calories, protein_g, sodium_mg."
     )
     try:
-        text = _groq_call(prompt, "You are a nutritionist. Respond only with JSON.", temperature=0.3, max_tokens=200)
+        text = _ai_call(prompt, "You are a nutritionist. Respond only with JSON.", temperature=0.3, max_tokens=200)
         if not text:
             return {"calories": 0, "protein_g": 0, "sodium_mg": 0}
         text = text.strip()
@@ -456,7 +466,7 @@ def process_natural_language(user_message, pantry_items=None, recipes=None):
         '{"action":"elaborate","items":["chicken katsu"],"message":"Let me elaborate..."}'
     )
     try:
-        text = _groq_call(prompt, "You are a kitchen assistant. Reply only in JSON.", temperature=0.1, max_tokens=200)
+        text = _ai_call(prompt, "You are a kitchen assistant. Reply only in JSON.", temperature=0.1, max_tokens=200)
         if not text:
             return {"action": "chat", "items": [], "message": "Sorry, I couldn't process that. Try again."}
         text = text.strip()
@@ -502,8 +512,9 @@ def process_natural_language(user_message, pantry_items=None, recipes=None):
 # --- Vision ---
 
 def _vision_call(prompt_text, base64_image):
+    global _daily_count
     try:
-        resp = client.chat.completions.create(
+        resp = groq_client.chat.completions.create(
             model=GROQ_VISION_MODEL,
             messages=[{"role": "user", "content": [
                 {"type": "text", "text": prompt_text},
@@ -575,7 +586,7 @@ def recipe_followup(recipe_text, user_question):
         "Reference the recipe details in your answer. Keep it concise."
     )
     try:
-        return _groq_call(prompt, CHEF_PERSONA + "\n\n---\n\nAnswer the user's question about the current recipe. Be helpful and specific.", temperature=0.5, max_tokens=600) or "AI error"
+        return _ai_call(prompt, CHEF_PERSONA + "\n\n---\n\nAnswer the user's question about the current recipe. Be helpful and specific.", temperature=0.5, max_tokens=600) or "AI error"
     except Exception as e:
         logger.exception("recipe_followup failed")
         return "AI error"
@@ -590,7 +601,7 @@ def parse_ingredients_from_text(recipe_text):
         'Example: ["chicken breast", "soy sauce", "rice", "garlic"]'
     )
     try:
-        text = _groq_call(prompt, "You are a recipe parser. Respond only with JSON array.", temperature=0.1, max_tokens=300)
+        text = _ai_call(prompt, "You are a recipe parser. Respond only with JSON array.", temperature=0.1, max_tokens=300)
         if not text:
             return ["Error could not parse ingredients"]
         text = text.strip()
@@ -612,7 +623,7 @@ def generate_shopping_list(recipe_title, missing_ingredients):
         "Suggest quantities in metric units and estimated prices in SGD. Return as bullet list."
     )
     try:
-        return _groq_call(prompt, "You are a helpful shopping assistant.", temperature=0.5, max_tokens=400) or "AI error"
+        return _ai_call(prompt, "You are a helpful shopping assistant.", temperature=0.5, max_tokens=400) or "AI error"
     except Exception as e:
         logger.exception("generate_shopping_list failed")
         return "AI error"
@@ -630,7 +641,7 @@ def substitute_ingredient(recipe_text, substitution_text):
         "Keep the same format as the original recipe with all sections."
     )
     try:
-        return _groq_call(prompt, CHEF_PERSONA + "\n\n---\n\nModify the recipe with the requested substitution. Return the FULL updated recipe.", temperature=0.5, max_tokens=2500) or "AI error"
+        return _ai_call(prompt, CHEF_PERSONA + "\n\n---\n\nModify the recipe with the requested substitution. Return the FULL updated recipe.", temperature=0.5, max_tokens=2500) or "AI error"
     except Exception as e:
         logger.exception("substitute_ingredient failed")
         return "AI error"
@@ -648,7 +659,7 @@ def scale_recipe(recipe_text, factor, target_servings=None):
         "Keep the same format with all sections."
     )
     try:
-        return _groq_call(prompt, CHEF_PERSONA + "\n\n---\n\nScale the recipe accurately. Return the FULL updated recipe with all ingredient quantities rescaled.", temperature=0.5, max_tokens=2500) or "AI error"
+        return _ai_call(prompt, CHEF_PERSONA + "\n\n---\n\nScale the recipe accurately. Return the FULL updated recipe with all ingredient quantities rescaled.", temperature=0.5, max_tokens=2500) or "AI error"
     except Exception as e:
         logger.exception("scale_recipe failed")
         return "AI error"
@@ -657,6 +668,7 @@ def scale_recipe(recipe_text, factor, target_servings=None):
 # --- Audio Transcription ---
 
 def transcribe_audio(audio_bytes, filename="audio.ogg"):
+    global _daily_count
     try:
         mime = "audio/ogg"
         if filename.endswith(".mp3"):
@@ -665,7 +677,7 @@ def transcribe_audio(audio_bytes, filename="audio.ogg"):
             mime = "audio/wav"
         elif filename.endswith(".m4a"):
             mime = "audio/mp4"
-        transcription = client.audio.transcriptions.create(
+        transcription = groq_client.audio.transcriptions.create(
             model="whisper-large-v3-turbo",
             file=(filename, audio_bytes, mime),
         )
@@ -699,7 +711,7 @@ def generate_batch_menu(count, cuisine, pantry_items, preferences="", diversity_
         'Example: [{"title":"Chicken Katsu Curry","description":"Crispy panko chicken with Japanese curry sauce","search_query":"chicken katsu curry recipe"}]'
     )
     try:
-        text = _groq_call(prompt, CHEF_JSON_SYSTEM, temperature=0.5, max_tokens=800)
+        text = _ai_call(prompt, CHEF_JSON_SYSTEM, temperature=0.5, max_tokens=800)
         if not text:
             return None
         return _extract_json_array(text)
@@ -726,7 +738,7 @@ def plan_batch(dish_titles, cuisine):
         "- Use metric measurements."
     )
     try:
-        return _groq_call(prompt, CHEF_PERSONA + "\n\n---\n\nCreate a consolidated cooking plan with detailed recipes and a cooking timeline.", temperature=0.5, max_tokens=4000) or "AI error"
+        return _ai_call(prompt, CHEF_PERSONA + "\n\n---\n\nCreate a consolidated cooking plan with detailed recipes and a cooking timeline.", temperature=0.5, max_tokens=4000) or "AI error"
     except Exception as e:
         logger.exception("plan_batch failed")
         return "AI error"
@@ -754,7 +766,7 @@ def categorize_pantry_items(items):
         'Example: {"chicken": "Proteins & Prepared Meats", "broccoli": "Vegetables & Fruits", "soy sauce": "Sauces, Condiments & Fermented"}'
     )
     try:
-        text = _groq_call(prompt, "You are a kitchen inventory assistant. Respond only with JSON.", temperature=0.1, max_tokens=1000)
+        text = _ai_call(prompt, "You are a kitchen inventory assistant. Respond only with JSON.", temperature=0.1, max_tokens=1000)
         if not text:
             return {}
         text = text.strip().replace("```json", "").replace("```", "").strip()
@@ -795,7 +807,7 @@ def generate_improvise_menu(expiring_items, pantry_items, preferences=""):
     )
 
     try:
-        text = _groq_call(prompt, CHEF_JSON_SYSTEM, temperature=0.5, max_tokens=800)
+        text = _ai_call(prompt, CHEF_JSON_SYSTEM, temperature=0.5, max_tokens=800)
         if not text:
             return None
         return _extract_json_array(text)
@@ -963,7 +975,7 @@ def import_recipe_from_url(url):
         f"{DETAILED_FORMAT}"
     )
     try:
-        return _groq_call(
+        return _ai_call(
             prompt,
             CHEF_PERSONA + "\n\n---\n\nExtract the complete recipe from the web page content. Return only the recipe in the requested format.",
             temperature=0.3, max_tokens=2500,
@@ -1063,7 +1075,7 @@ def suggest_random_ingredient(country=""):
         "Never make up ingredients."
     )
     try:
-        return _groq_call(
+        return _ai_call(
             prompt, system,
             temperature=0.9, max_tokens=1200,
         ) or "AI error"
