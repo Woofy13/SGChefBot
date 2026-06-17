@@ -323,6 +323,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "  /weekly                          weekly summary\n\n"
         "*Settings*\n\n"
         "  /equipment air fryer, oven       save your kitchen gear\n"
+        "  /addequipment air fryer          add to existing gear\n"
         "  /diet keto                       set a diet profile\n"
         "  /diet all                        reset to normal\n\n"
         "*Household Sharing*\n\n"
