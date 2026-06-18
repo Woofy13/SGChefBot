@@ -148,7 +148,7 @@ def _init_sqlite():
             user_id INTEGER NOT NULL,
             name TEXT NOT NULL,
             details TEXT DEFAULT '',
-            expiry_date TEXT NOT NULL,
+            expiry_date TEXT,
             created_at TEXT DEFAULT (date('now'))
         );
     """)
@@ -469,7 +469,7 @@ def _init_pg():
             user_id INTEGER NOT NULL,
             name TEXT NOT NULL,
             details TEXT DEFAULT '',
-            expiry_date TEXT NOT NULL,
+            expiry_date TEXT,
             created_at TEXT DEFAULT (CURRENT_DATE)
         );
     """)
@@ -1529,7 +1529,7 @@ def get_active_vouchers(user_id):
     today_str = date.today().isoformat()
     conn = get_connection()
     cur = _execute(conn,
-        _q("SELECT id, user_id, name, details, expiry_date, created_at FROM vouchers WHERE user_id = ? AND expiry_date >= ? ORDER BY expiry_date"),
+        _q("SELECT id, user_id, name, details, expiry_date, created_at FROM vouchers WHERE user_id = ? AND (expiry_date IS NULL OR expiry_date >= ?) ORDER BY expiry_date"),
         (user_id, today_str),
     )
     rows = _fetchall(cur)

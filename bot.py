@@ -3976,26 +3976,28 @@ async def add_voucher_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     args = context.args
     if not args or len(args) < 1:
-        await update.message.reply_text("Usage: `/addvoucher PARADISE, $10 off $50, 30th June`", parse_mode="Markdown")
+        await update.message.reply_text("Usage: `/addvoucher PARADISE, $10 off $50, 30th June`\nExpiry is optional — `/addvoucher NAME, details` works too.", parse_mode="Markdown")
         return
     raw = " ".join(args)
     parts = [p.strip() for p in raw.split(",") if p.strip()]
-    if len(parts) < 3:
-        await update.message.reply_text("Need at least 3 comma-separated fields: name, details, expiry date")
+    if len(parts) < 2:
+        await update.message.reply_text("Need at least 2 comma-separated fields: name, details [, expiry date]")
         return
     name = parts[0]
     details = parts[1]
-    expiry_raw = ", ".join(parts[2:])
-    parsed = _parse_expiry(expiry_raw)
-    if not parsed:
-        await update.message.reply_text(f"Could not parse expiry date: {expiry_raw}")
-        return
+    parsed = None
+    if len(parts) >= 3:
+        expiry_raw = ", ".join(parts[2:])
+        parsed = _parse_expiry(expiry_raw)
     db.add_voucher(user_id, name, details, parsed)
-    try:
-        due = date.fromisoformat(parsed).strftime("%-d %b %Y")
-    except Exception:
-        due = parsed
-    await update.message.reply_text(f"\u2705 Added voucher: **{name}** — {details} (exp {due})", parse_mode="Markdown")
+    if parsed:
+        try:
+            due = date.fromisoformat(parsed).strftime("%-d %b %Y")
+        except Exception:
+            due = parsed
+        await update.message.reply_text(f"\u2705 Added voucher: **{name}** — {details} (exp {due})", parse_mode="Markdown")
+    else:
+        await update.message.reply_text(f"\u2705 Added voucher: **{name}** — {details} (no expiry)", parse_mode="Markdown")
 
 
 async def vouchers_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4011,17 +4013,21 @@ async def vouchers_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = ["\U0001f39f Your Vouchers", ""]
     buttons = []
     for v in vouchers:
-        try:
-            exp = date.fromisoformat(v["expiry_date"])
-            remaining = (exp - today).days
-            exp_str = exp.strftime("%-d %b %Y")
-            days_str = f" ({remaining}d left)" if remaining >= 0 else " (expired)"
-        except Exception:
-            exp_str = v["expiry_date"]
-            days_str = ""
+        exp_str = v.get("expiry_date")
+        if exp_str:
+            try:
+                exp = date.fromisoformat(exp_str)
+                remaining = (exp - today).days
+                exp_str = exp.strftime("%-d %b %Y")
+                days_str = f" ({remaining}d left)" if remaining >= 0 else " (expired)"
+            except Exception:
+                days_str = ""
+            exp_line = f"   \u26a0 Expires: {exp_str}{days_str}"
+        else:
+            exp_line = "   \u26a0 No expiry"
         lines.append(f"{v['id']}. {v['name']}")
         lines.append(f"   \U0001f4cb {v['details']}")
-        lines.append(f"   \u26a0 Expires: {exp_str}{days_str}")
+        lines.append(exp_line)
         lines.append("")
         buttons.append([InlineKeyboardButton(f"\u2705 Use {v['name']}", callback_data=f"voucher_use_{v['id']}")])
     await update.message.reply_text("\n".join(lines).strip(), reply_markup=InlineKeyboardMarkup(buttons))
@@ -4045,17 +4051,21 @@ async def voucher_use_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     lines = ["\U0001f39f Your Vouchers", ""]
     buttons = []
     for v2 in remaining:
-        try:
-            exp = date.fromisoformat(v2["expiry_date"])
-            rem = (exp - today).days
-            exp_str = exp.strftime("%-d %b %Y")
-            days_str = f" ({rem}d left)" if rem >= 0 else " (expired)"
-        except Exception:
-            exp_str = v2["expiry_date"]
-            days_str = ""
+        es = v2.get("expiry_date")
+        if es:
+            try:
+                exp = date.fromisoformat(es)
+                rem = (exp - today).days
+                es = exp.strftime("%-d %b %Y")
+                days_str = f" ({rem}d left)" if rem >= 0 else " (expired)"
+            except Exception:
+                days_str = ""
+            exp_line = f"   \u26a0 Expires: {es}{days_str}"
+        else:
+            exp_line = "   \u26a0 No expiry"
         lines.append(f"{v2['id']}. {v2['name']}")
         lines.append(f"   \U0001f4cb {v2['details']}")
-        lines.append(f"   \u26a0 Expires: {exp_str}{days_str}")
+        lines.append(exp_line)
         lines.append("")
         buttons.append([InlineKeyboardButton(f"\u2705 Use {v2['name']}", callback_data=f"voucher_use_{v2['id']}")])
     await query.edit_message_text("\n".join(lines).strip(), reply_markup=InlineKeyboardMarkup(buttons))
