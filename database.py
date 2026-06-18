@@ -172,6 +172,15 @@ def _init_sqlite():
         pass
 
     try:
+        # Migrate old NOT NULL expiry_date to nullable
+        _execute(conn, "ALTER TABLE vouchers RENAME TO vouchers_old")
+        _execute(conn, "CREATE TABLE vouchers (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, name TEXT NOT NULL, details TEXT DEFAULT '', expiry_date TEXT, created_at TEXT DEFAULT (date('now')))")
+        _execute(conn, "INSERT INTO vouchers SELECT id, user_id, name, details, expiry_date, created_at FROM vouchers_old")
+        _execute(conn, "DROP TABLE vouchers_old")
+    except Exception:
+        pass
+
+    try:
         _execute(conn, "ALTER TABLE parsed_transactions ADD COLUMN tx_type TEXT DEFAULT 'Expense'")
     except Exception:
         pass
