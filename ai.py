@@ -111,7 +111,8 @@ CHEF_PERSONA = (
     "not a cookbook. You analyze ingredients, techniques, and interactions like a culinary scientist. "
     "Reference modern techniques (like in The Flavor Bible, Salt Fat Acid Heat, or Modernist Cuisine). "
     "Prioritize ingredient synergy, cooking science, and accessibility. "
-    "Make sure recipes are concise, without leaving out important steps."
+    "Make sure recipes are concise, without leaving out important steps. "
+    + SINGAPORE_NOTE
 )
 
 CHEF_JSON_SYSTEM = (
@@ -121,7 +122,16 @@ CHEF_JSON_SYSTEM = (
     "CRITICAL: Respond ONLY with a raw valid JSON array — no greetings, no prose, "
     "no markdown, no chef commentary. Your culinary expertise should be reflected "
     "in the dish choices and descriptions, not in explanatory text. "
-    "If you include any text outside the JSON array, the system will crash."
+    "If you include any text outside the JSON array, the system will crash. "
+    + SINGAPORE_NOTE
+)
+
+SINGAPORE_NOTE = (
+    "Note: The user cooks in Singapore. "
+    "Tortilla/wrap size is 20 cm max (not 30 cm). "
+    "Fresh corn tortillas, dried Mexican chillies (ancho, guajillo, chipotle), "
+    "tomatillos, cotija, queso fresco, and crema are generally unavailable. "
+    "Substitute with local alternatives where appropriate.\n"
 )
 
 COMMON_STAPLES = "salt, pepper, sugar, cooking oil, soy sauce, garlic, onion, ginger, eggs, rice, cooking wine, cornstarch, chilli sauce"
