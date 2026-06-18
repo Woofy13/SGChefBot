@@ -13,7 +13,7 @@ if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 from config import TELEGRAM_BOT_TOKEN, DEEPSEEK_API_KEY, OWNER_TELEGRAM_ID
-from database import init_db, add_called_ingredient
+from database import init_db, add_called_ingredient, get_user_preference, set_user_preference, get_monthly_reminders, add_monthly_reminder
 from bot import create_app
 
 
@@ -76,6 +76,22 @@ def main():
     for ing in ["Cincalok", "Belacan", "Bubu"]:
         add_called_ingredient(OWNER_TELEGRAM_ID, ing)
     print("Database initialized")
+
+    rb_path = os.path.join(os.path.dirname(__file__), "money_manager.md")
+    if os.path.exists(rb_path):
+        existing_rb = get_user_preference(OWNER_TELEGRAM_ID, "rulebook_md")
+        if not existing_rb:
+            try:
+                with open(rb_path, "r", encoding="utf-8") as f:
+                    set_user_preference(OWNER_TELEGRAM_ID, "rulebook_md", f.read())
+                print("Loaded money_manager.md into user preferences")
+            except Exception as e:
+                print(f"Could not load money_manager.md: {e}")
+
+    existing_reminders = get_monthly_reminders(OWNER_TELEGRAM_ID)
+    if not existing_reminders:
+        add_monthly_reminder(OWNER_TELEGRAM_ID, "Bill reminder! Check your monthly fees.", 15)
+        print("Seeded monthly bill reminder (15th)")
 
     app = create_app(TELEGRAM_BOT_TOKEN)
     print("SG Chef Bot is running... (Ctrl+C to stop)")

@@ -18,6 +18,7 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
+from cachetools import TTLCache
 
 import database as db
 import ai
@@ -28,51 +29,49 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Store the last AI-suggested recipe text and user prompt per user
-_last_suggestion = {}
-_last_preference = {}
-_last_menu = {}  # user_id -> [{"title": ..., "description": ..., "search_query": ...}]
-_menu_history = {}  # user_id -> set of dish titles seen across all regenerations
+_TWO_WEEKS = 60 * 60 * 24 * 14
 
-# Batch cooking state
-_batch_state = {}  # user_id -> {"count": int, "cuisine": str, "menu": [...], "selected": set(int), "msg_id": int}
-_batch_history = {}  # user_id -> set of dish titles seen across batch regenerations
+_last_suggestion = TTLCache(maxsize=1000, ttl=_TWO_WEEKS)
+_last_preference = TTLCache(maxsize=1000, ttl=_TWO_WEEKS)
+_last_menu = TTLCache(maxsize=1000, ttl=_TWO_WEEKS)
+_menu_history = TTLCache(maxsize=1000, ttl=_TWO_WEEKS)
 
-# Cooking mode state
-_cook_state = {}  # user_id -> {"title": str, "ingredients": list[str], "steps": list[str], "shown": int, "msg_id": int}
+_batch_state = TTLCache(maxsize=500, ttl=_TWO_WEEKS)
+_batch_history = TTLCache(maxsize=500, ttl=_TWO_WEEKS)
 
-# Pending cooked dish tracking
-_pending_cooked = {}  # user_id -> dish_name (str) or list of dish names (batch)
+_cook_state = TTLCache(maxsize=500, ttl=_TWO_WEEKS)
 
-# Batch export state
-_batch_export = {}  # user_id -> {"step": "awaiting_input"}
+_pending_cooked = TTLCache(maxsize=1000, ttl=_TWO_WEEKS)
 
-# Random ingredient country tracker
-_random_country = {}  # user_id -> country string
+_batch_export = TTLCache(maxsize=500, ttl=3600)
 
-# Photo tracking
-_photo_counts = {}  # user_id -> date
+_random_country = TTLCache(maxsize=1000, ttl=_TWO_WEEKS)
+_random_item_type = TTLCache(maxsize=1000, ttl=_TWO_WEEKS)
+
+_photo_counts = TTLCache(maxsize=1000, ttl=_TWO_WEEKS)
 PHOTO_DAILY_LIMIT = 30
-MAX_PHOTO_SIZE = 10 * 1024 * 1024  # 10MB
+MAX_PHOTO_SIZE = 10 * 1024 * 1024
 
-# Per-user AI call tracking
-_ai_counts = {}  # user_id -> count per day
-_ai_count_date = date.today()
-AI_DAILY_LIMIT = 1500
+_is_saved_recipe = TTLCache(maxsize=1000, ttl=_TWO_WEEKS)
+
+_receipt_items = TTLCache(maxsize=500, ttl=3600)
+
+_pref_cache = TTLCache(maxsize=1000, ttl=300)
+
+
+def _get_prefs(user_id):
+    cached = _pref_cache.get(user_id)
+    if cached is not None:
+        return cached
+    equip = db.get_user_preference(user_id, "equipment")
+    diet = db.get_user_preference(user_id, "diet_profile")
+    cached = {"equipment": equip, "diet": diet}
+    _pref_cache[user_id] = cached
+    return cached
 
 
 def _check_ai_limit(user_id):
-    global _ai_count_date, _ai_counts
-    today = date.today()
-    if today != _ai_count_date:
-        _ai_counts = {}
-        _ai_count_date = today
-    if user_id == OWNER_TELEGRAM_ID:
-        return
-    _ai_counts.setdefault(user_id, 0)
-    _ai_counts[user_id] += 1
-    if _ai_counts[user_id] > AI_DAILY_LIMIT:
-        raise RuntimeError("You've reached your daily request limit (5,000). Try again tomorrow.")
+    pass
 
 
 RANKS = [
@@ -129,11 +128,13 @@ def _get_badges(stats, dishes):
     return badges
 
 
-# Track whether the recipe in _last_suggestion is already saved (hide Save button)
-_is_saved_recipe = {}
-
-# Receipt scan state
-_receipt_items = {}  # {user_id: {"items": [{"name": str, "expiry": str}, ...], "msg_id": int}}
+# Finance: statement parser state
+_pending_statement = TTLCache(maxsize=500, ttl=3600)
+_parse_edit = TTLCache(maxsize=500, ttl=3600)
+_parse_msg = TTLCache(maxsize=500, ttl=_TWO_WEEKS)
+_pending_bill = TTLCache(maxsize=500, ttl=3600)
+_pending_bill_from_parse = TTLCache(maxsize=500, ttl=3600)
+_merge_buffer = TTLCache(maxsize=500, ttl=3600)
 
 
 def _fmt_date(iso_str):
@@ -411,6 +412,7 @@ async def equipment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if args:
         value = " ".join(args)
         db.set_user_preference(user_id, "equipment", value)
+        _pref_cache.pop(user_id, None)
         await update.message.reply_text(f"Saved your equipment: {value}")
     else:
         current = db.get_user_preference(user_id, "equipment")
@@ -434,6 +436,7 @@ async def addequipment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         merged = new_items
     db.set_user_preference(user_id, "equipment", merged)
+    _pref_cache.pop(user_id, None)
     await update.message.reply_text(f"Added! Equipment: {merged}")
 
 
@@ -450,10 +453,12 @@ async def diet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     value = " ".join(args).strip().lower()
     if value in ("all", "reset", "none"):
         db.set_user_preference(user_id, "diet_profile", "")
+        _pref_cache.pop(user_id, None)
         _last_preference.pop(user_id, None)
         await update.message.reply_text("Diet profile reset to normal.")
     else:
         db.set_user_preference(user_id, "diet_profile", value)
+        _pref_cache.pop(user_id, None)
         await update.message.reply_text(f"Diet profile set to: {value}\nAll suggestions will adapt to this diet.")
 
 
@@ -653,8 +658,9 @@ async def improvise(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _do_suggest(update, context, user_id, pantry, pref):
     _check_ai_limit(user_id)
-    equip = db.get_user_preference(user_id, "equipment")
-    diet = db.get_user_preference(user_id, "diet_profile")
+    prefs = _get_prefs(user_id)
+    equip = prefs["equipment"]
+    diet = prefs["diet"]
     extra = f"Equipment: {equip}." if equip else ""
     if diet:
         extra += f" Diet: {diet}."
@@ -769,13 +775,14 @@ async def _elaborate_dish(update, context, user_id, text, dish_index, pantry_ite
         return
 
     dish = menu[dish_index]
-    equip = db.get_user_preference(user_id, "equipment")
-    diet = db.get_user_preference(user_id, "diet_profile")
-    prefs = f"{_last_preference.get(user_id, '')}\nEquipment: {equip}.".strip()
+    prefs = _get_prefs(user_id)
+    equip = prefs["equipment"]
+    diet = prefs["diet"]
+    prefs_str = f"{_last_preference.get(user_id, '')}\nEquipment: {equip}.".strip()
     if diet:
-        prefs += f" Diet: {diet}."
+        prefs_str += f" Diet: {diet}."
     busy = await update.effective_message.reply_text(f"Getting details for {dish['title']}...")
-    result = ai.elaborate_recipe(dish.get("search_query", dish["title"]), pantry_items, prefs)
+    result = ai.elaborate_recipe(dish.get("search_query", dish["title"]), pantry_items, prefs_str)
     _last_suggestion[user_id] = result
     _is_saved_recipe[user_id] = False
     _pending_cooked[user_id] = dish["title"]
@@ -842,8 +849,16 @@ async def suggest_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
     elif query.data == "suggest_again":
         user_id = query.from_user.id
-        equip = db.get_user_preference(user_id, "equipment")
-        diet = db.get_user_preference(user_id, "diet_profile")
+        seen = _menu_history.get(user_id, set())
+        if len(seen) >= 50:
+            _menu_history.pop(user_id, None)
+            await query.edit_message_text(
+                "🔄 Too many dishes have been generated. Please try again with /suggest!"
+            )
+            return
+        prefs = _get_prefs(user_id)
+        equip = prefs["equipment"]
+        diet = prefs["diet"]
         pantry = db.get_pantry_names(user_id)
         prev_pref = _last_preference.get(user_id, "")
         extra = f"Equipment: {equip}." if equip else ""
@@ -876,11 +891,19 @@ async def suggest_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data == "canbake_again":
         user_id = query.from_user.id
+        seen = _menu_history.get(user_id, set())
+        if len(seen) >= 50:
+            _menu_history.pop(user_id, None)
+            await query.edit_message_text(
+                "🔄 Too many dishes have been generated. Please try again with /canbake!"
+            )
+            return
         pantry = db.get_pantry_names(user_id)
         if not pantry:
             await query.edit_message_text("Your pantry is empty! Add items first.")
             return
-        equip = db.get_user_preference(user_id, "equipment")
+        prefs = _get_prefs(user_id)
+        equip = prefs["equipment"]
         prev_pref = _last_preference.get(user_id, "")
         pref = f"Equipment: {equip}.\n{prev_pref}" if equip else prev_pref
         await query.edit_message_text("Thinking...")
@@ -1649,7 +1672,8 @@ async def canbake(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     msg = await update.effective_message.reply_text("Checking your pantry...")
-    equip = db.get_user_preference(user_id, "equipment")
+    prefs = _get_prefs(user_id)
+    equip = prefs["equipment"]
     pref = f"Equipment: {equip}.\n" if equip else ""
     pref += "Suggest recipes I can cook RIGHT NOW using ONLY ingredients from this list plus common staples."
     menu = ai.suggest_recipe(pantry, pref)
@@ -1688,7 +1712,7 @@ async def log_meal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     meal_desc = " ".join(args)
 
     msg = await update.message.reply_text("📊 Estimating nutrition...")
-    nutrition = ai.estimate_meal_calories(meal_desc)
+    nutrition = ai.meal_nutrition(meal_desc)
 
     db.log_meal(
         update.effective_user.id,
@@ -1750,7 +1774,7 @@ async def nutrition(update: Update, context: ContextTypes.DEFAULT_TYPE):
     food = " ".join(args)
 
     msg = await update.message.reply_text("🔍 Looking up nutrition...")
-    info = ai.nutrition_info(food)
+    info = ai.get_nutrition(food)
 
     if "error" in info:
         await msg.edit_text(f"Sorry, couldn't look up {food}. Try a simpler name.")
@@ -1978,8 +2002,38 @@ async def _handle_user_text(update, context, user_id, text):
     """Core text processing logic used by both handle_text and handle_voice."""
     raw_user_id = user_id  # keep original for personal-only state
     user_id = _effective_user_id(user_id)
-    pantry = db.get_pantry_names(user_id)
-    recipes = db.get_recipes(user_id)
+
+    t_lower = text.lower().strip()
+
+    if any(w in t_lower for w in ["what do i have", "show pantry", "list pantry", "my pantry", "whats in my pantry", "what's in my pantry"]):
+        groups = db.get_pantry_grouped(user_id)
+        if not groups:
+            await update.effective_message.reply_text("Your pantry is empty. Tell me what to add!")
+            return
+        await _send_long_message(update, None, _format_pantry_grouped(groups), None)
+        return
+
+    if any(w in t_lower for w in ["show recipes", "list recipes", "my recipes", "saved recipes"]) and "recipe" in t_lower:
+        await list_recipes(update, context)
+        return
+
+    if any(w in t_lower for w in ["expiring", "expire soon", "going bad", "expiring soon"]):
+        await expiring(update, context)
+        return
+
+    if any(w in t_lower for w in ["clear pantry", "clear my pantry", "empty pantry", "reset pantry"]):
+        eff_id = _effective_user_id(user_id)
+        for item in db.get_pantry_names(eff_id):
+            db.remove_pantry_item(eff_id, item)
+        await update.effective_message.reply_text("Pantry cleared!")
+        return
+
+    if any(w in t_lower for w in ["shopping list", "show shopping", "my shopping", "view shopping"]):
+        await list_shopping(update, context)
+        return
+
+    pantry = None
+    recipes = None
 
     # Check batch state first (before dish selection, to avoid conflicts)
     state = _batch_state.get(raw_user_id)
@@ -2007,7 +2061,6 @@ async def _handle_user_text(update, context, user_id, text):
     export_state = _batch_export.get(raw_user_id)
     if export_state and export_state.get("step") == "awaiting_input":
         _batch_export.pop(raw_user_id, None)
-        t_lower = text.lower().strip()
         user_recipes = db.get_recipes(user_id)
         if not user_recipes:
             await update.effective_message.reply_text("No recipes to export.")
@@ -2076,6 +2129,8 @@ async def _handle_user_text(update, context, user_id, text):
         or len(t.split()) <= 3
     )
     if is_dish_pick and _last_menu.get(user_id):
+        if pantry is None:
+            pantry = db.get_pantry_names(user_id)
         await _elaborate_dish(update, context, user_id, text, dish_index, pantry)
         return
 
@@ -2170,6 +2225,10 @@ async def _handle_user_text(update, context, user_id, text):
 
     # --- NL Processing ---
     msg = await update.effective_message.reply_text("Thinking...")
+    if pantry is None:
+        pantry = db.get_pantry_names(user_id)
+    if recipes is None:
+        recipes = db.get_recipes(user_id)
     result = ai.process_natural_language(text, pantry, recipes)
     action = result.get("action", "chat")
     items = result.get("items", [])
@@ -2179,17 +2238,16 @@ async def _handle_user_text(update, context, user_id, text):
         eff_id = _effective_user_id(user_id)
         expiry = _parse_expiry(result.get("expiry_date", ""))
         db.add_pantry_items(eff_id, items, expiry=expiry)
-        pantry_items = db.get_pantry(eff_id)
-        names = [i["name"] for i in pantry_items]
-        cat_map = ai.categorize_pantry_items(names)
-        if cat_map:
-            db.recategorize_by_map(eff_id, cat_map)
+        if items:
+            cat_map = ai.categorize_pantry_items(items)
+            if cat_map:
+                db.recategorize_by_map(eff_id, cat_map)
         await msg.edit_text("Added and sorted!")
 
     elif action == "remove":
         eff_id = _effective_user_id(user_id)
-        for item in items:
-            db.remove_pantry_item(eff_id, item)
+        if items:
+            db.remove_pantry_items(eff_id, items)
         await msg.edit_text(reply)
 
     elif action == "clear_pantry":
@@ -2371,6 +2429,32 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db.store_chat_id(user_id, update.effective_chat.id)
     text = update.message.text.strip()
 
+    if user_id == OWNER_TELEGRAM_ID:
+        edit_tx_id = _parse_edit.get(user_id)
+        if edit_tx_id is not None:
+            _parse_edit.pop(user_id, None)
+            ok, msg = _apply_correction(user_id, edit_tx_id, text)
+            await update.effective_message.reply_text(msg, parse_mode="Markdown")
+            tx = db.get_parsed_transaction(edit_tx_id)
+            if tx:
+                rtext, rkb = _render_parse_session(tx["session_id"])
+                if rtext and user_id in _parse_msg:
+                    try:
+                        await context.bot.edit_message_text(
+                            rtext,
+                            chat_id=update.effective_chat.id,
+                            message_id=_parse_msg[user_id],
+                            reply_markup=rkb,
+                        )
+                    except Exception:
+                        pass
+            return
+
+        if _pending_statement.get(user_id):
+            _pending_statement.pop(user_id, None)
+            await handle_statement_parse(update, context, user_id, text)
+            return
+
     receipt_state = _receipt_items.get(user_id)
     if receipt_state and receipt_state["items"]:
         t = text.lower().strip()
@@ -2422,27 +2506,36 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db.store_chat_id(update.effective_user.id, update.effective_chat.id)
     user_id = update.effective_user.id
+    _check_ai_limit(user_id)
     caption = (update.message.caption or "").lower()
     is_receipt = any(w in caption for w in ["receipt", "scan", "recipt"])
 
-    # Photo daily limit check (owner bypass)
     today = date.today()
-    _photo_counts.setdefault(user_id, {"date": None, "count": 0})
-    if _photo_counts[user_id]["date"] != today:
-        _photo_counts[user_id] = {"date": today, "count": 0}
-    if user_id != OWNER_TELEGRAM_ID and _photo_counts[user_id]["count"] >= PHOTO_DAILY_LIMIT:
+    pc = _photo_counts.get(user_id)
+    if not pc or pc["date"] != today:
+        pc = {"date": today, "count": 0}
+        _photo_counts[user_id] = pc
+    if user_id != OWNER_TELEGRAM_ID and pc["count"] >= PHOTO_DAILY_LIMIT:
         await update.message.reply_text("Daily photo scan limit reached (30). Try again tomorrow.")
         return
-    _photo_counts[user_id]["count"] += 1
+    pc["count"] += 1
+
+    photos = update.message.photo
+    if not photos:
+        return
+    photo = photos[-1]
+    for candidate in photos:
+        if candidate.width >= 800 and candidate.file_size and candidate.file_size <= MAX_PHOTO_SIZE:
+            photo = candidate
+            break
+    if photo.file_size and photo.file_size > MAX_PHOTO_SIZE:
+        await update.message.reply_text("Image too large. Please send a smaller photo (<10MB).")
+        return
 
     if is_receipt:
         msg = await update.message.reply_text("\U0001f9fe Scanning receipt...")
         try:
-            photo = update.message.photo[-1]
             file = await photo.get_file()
-            if file.file_size and file.file_size > MAX_PHOTO_SIZE:
-                await msg.edit_text("Image too large. Please send a smaller photo (<10MB).")
-                return
             file_bytes = await file.download_as_bytearray()
             b64 = base64.b64encode(file_bytes).decode("utf-8")
             names = ai.scan_receipt_from_image(b64)
@@ -2460,11 +2553,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     msg = await update.message.reply_text("Analyzing image...")
     try:
-        photo = update.message.photo[-1]
         file = await photo.get_file()
-        if file.file_size and file.file_size > MAX_PHOTO_SIZE:
-            await msg.edit_text("Image too large. Please send a smaller photo (<10MB).")
-            return
         file_bytes = await file.download_as_bytearray()
         b64 = base64.b64encode(file_bytes).decode("utf-8")
 
@@ -2565,38 +2654,57 @@ async def receipt_confirm_callback(update: Update, context: ContextTypes.DEFAULT
     if not data or not data["items"]:
         await query.edit_message_text("Nothing to add.")
         return
-    added = []
-    for item in data["items"]:
-        db.add_pantry_item(user_id, item["name"], expiry=item.get("expiry", ""))
-        added.append(item["name"].title())
+    items_with_expiry = [(item["name"], item.get("expiry", "")) for item in data["items"]]
+    db.add_pantry_items_with_expiry(user_id, items_with_expiry)
+    added = [item["name"].title() for item in data["items"]]
     await query.edit_message_text(f"\u2705 Added {len(added)} item(s) to pantry: {', '.join(added)}")
 
 
-def _extract_ingredient_name(text):
-    m = re.search(r'\*\*🛒 Ingredient:\*\*\s*(.+?)(?:\n|$)', text)
+def _extract_item_name(text):
+    m = re.search(r'\*\*(?:🛒 Ingredient|🧰 Equipment):\*\*\s*(.+?)(?:\n|$)', text)
     return m.group(1).strip().lower() if m else ""
+
+
+def _parse_random_args(args):
+    country_parts = []
+    item_type = "any"
+    type_keywords = {"ingredient": "ingredient", "ingredients": "ingredient", "food": "ingredient",
+                     "equipment": "equipment", "tool": "equipment", "tools": "equipment", "gear": "equipment"}
+    for arg in args:
+        low = arg.lower().strip()
+        if low in type_keywords:
+            item_type = type_keywords[low]
+        else:
+            country_parts.append(arg)
+    country = " ".join(country_parts).strip()
+    return country, item_type
 
 
 async def random_ingredient(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _check_ai_limit(update.effective_user.id)
     user_id = update.effective_user.id
-    country = " ".join(context.args).strip() if context.args else ""
+    country, item_type = _parse_random_args(context.args or [])
     _random_country[user_id] = country
-    msg = await update.message.reply_text("Thinking..." if not country else f"Finding a {country} ingredient...")
+    _random_item_type[user_id] = item_type
+    type_label = {"ingredient": "ingredient", "equipment": "kitchen tool", "any": "ingredient or tool"}[item_type]
+    msg = await update.message.reply_text(
+        f"Finding a {country + ' ' if country else ''}{type_label}..."
+    )
     called = db.get_called_ingredients(user_id)
-    result = ai.suggest_random_ingredient(country, called)
+    result = ai.suggest_random_item(country, called, item_type=item_type)
     if result == "NO_INGREDIENTS_LEFT":
-        await msg.edit_text("No more unique ingredients found!")
+        await msg.edit_text("No more unique items found! Try /randomreset to start over.")
         return
     if result == "AI error" or result.startswith("Something went wrong"):
         await msg.edit_text("AI is temporarily unavailable (high demand). Try again in a moment.")
         return
-    name = _extract_ingredient_name(result)
+    name = _extract_item_name(result)
     if name:
         db.add_called_ingredient(user_id, name)
     _last_suggestion[_effective_user_id(user_id)] = result
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔄 Regenerate", callback_data="random_regenerate")],
+        [InlineKeyboardButton("🔄 Regenerate", callback_data="random_regenerate"),
+         InlineKeyboardButton("🔀 Switch type", callback_data="random_switch")],
     ])
     sanitized = _sanitize_markdown(result)
     await msg.edit_text(sanitized, parse_mode="Markdown", reply_markup=keyboard)
@@ -2607,33 +2715,1471 @@ async def random_regenerate_callback(update: Update, context: ContextTypes.DEFAU
     await query.answer()
     user_id = query.from_user.id
     country = _random_country.get(user_id, "")
+    item_type = _random_item_type.get(user_id, "any")
     called = db.get_called_ingredients(user_id)
-    result = ai.suggest_random_ingredient(country, called)
+    result = ai.suggest_random_item(country, called, item_type=item_type)
     if result == "NO_INGREDIENTS_LEFT":
-        await query.edit_message_text("No more unique ingredients found!")
+        await query.edit_message_text("No more unique items found! Try /randomreset to start over.")
         return
     if result == "AI error" or result.startswith("Something went wrong"):
         await query.edit_message_text("AI is temporarily unavailable (high demand). Try again in a moment.")
         return
-    name = _extract_ingredient_name(result)
+    name = _extract_item_name(result)
     if name:
         db.add_called_ingredient(user_id, name)
     _last_suggestion[_effective_user_id(user_id)] = result
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔄 Regenerate", callback_data="random_regenerate")],
+        [InlineKeyboardButton("🔄 Regenerate", callback_data="random_regenerate"),
+         InlineKeyboardButton("🔀 Switch type", callback_data="random_switch")],
     ])
     sanitized = _sanitize_markdown(result)
     await query.edit_message_text(sanitized, parse_mode="Markdown", reply_markup=keyboard)
 
 
+async def random_switch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    current = _random_item_type.get(user_id, "any")
+    if current == "ingredient":
+        new_type = "equipment"
+    elif current == "equipment":
+        new_type = "ingredient"
+    else:
+        import random as _random
+        new_type = _random.choice(["ingredient", "equipment"])
+    _random_item_type[user_id] = new_type
+    country = _random_country.get(user_id, "")
+    called = db.get_called_ingredients(user_id)
+    result = ai.suggest_random_item(country, called, item_type=new_type)
+    if result == "NO_INGREDIENTS_LEFT":
+        await query.edit_message_text("No more unique items found! Try /randomreset to start over.")
+        return
+    if result == "AI error" or result.startswith("Something went wrong"):
+        await query.edit_message_text("AI is temporarily unavailable (high demand). Try again in a moment.")
+        return
+    name = _extract_item_name(result)
+    if name:
+        db.add_called_ingredient(user_id, name)
+    _last_suggestion[_effective_user_id(user_id)] = result
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 Regenerate", callback_data="random_regenerate"),
+         InlineKeyboardButton("🔀 Switch type", callback_data="random_switch")],
+    ])
+    sanitized = _sanitize_markdown(result)
+    await query.edit_message_text(sanitized, parse_mode="Markdown", reply_markup=keyboard)
+
+
+async def random_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    db.set_user_preference(user_id, "called_ingredients", "[]")
+    await update.message.reply_text("🔄 Reset! All previously shown items can appear again.")
+
+
+# --- Token Usage / Cost Tracking ---
+# DeepSeek pricing per 1M tokens (deepseek-v4-flash)
+PRICE_INPUT_CACHE_MISS = 0.14
+PRICE_INPUT_CACHE_HIT = 0.0028
+PRICE_OUTPUT = 0.28
+
+
+def _calc_cost(stats):
+    prompt_miss = stats["p"] - stats["h"]
+    if prompt_miss < 0:
+        prompt_miss = 0
+    cost = (prompt_miss / 1_000_000 * PRICE_INPUT_CACHE_MISS
+            + stats["h"] / 1_000_000 * PRICE_INPUT_CACHE_HIT
+            + stats["c"] / 1_000_000 * PRICE_OUTPUT)
+    return cost
+
+
+def _fmt_tokens(n):
+    if n >= 1_000_000:
+        return f"{n/1_000_000:.2f}M"
+    if n >= 1_000:
+        return f"{n/1_000:.1f}K"
+    return str(n)
+
+
+async def tokens_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id != OWNER_TELEGRAM_ID:
+        return
+    today = db.get_token_usage_today()
+    month = db.get_token_usage_month()
+    lifetime = db.get_token_usage_lifetime()
+    today_cost = _calc_cost(today)
+    month_cost = _calc_cost(month)
+    lifetime_cost = _calc_cost(lifetime)
+    text = (
+        "📊 *Token Usage & Cost*\n"
+        f"Model: `deepseek-v4-flash`\n"
+        f"Pricing: input `${PRICE_INPUT_CACHE_MISS}/M` (cache miss), `${PRICE_INPUT_CACHE_HIT}/M` (cache hit), output `${PRICE_OUTPUT}/M`\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "*Today*\n"
+        f"  Prompt: {_fmt_tokens(today['p'])} (cache hit: {_fmt_tokens(today['h'])})\n"
+        f"  Output: {_fmt_tokens(today['c'])}\n"
+        f"  Calls: {today['n']}\n"
+        f"  Cost: ${today_cost:.4f}\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "*This Month*\n"
+        f"  Prompt: {_fmt_tokens(month['p'])} (cache hit: {_fmt_tokens(month['h'])})\n"
+        f"  Output: {_fmt_tokens(month['c'])}\n"
+        f"  Calls: {month['n']}\n"
+        f"  Cost: ${month_cost:.4f}\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "*Lifetime*\n"
+        f"  Prompt: {_fmt_tokens(lifetime['p'])} (cache hit: {_fmt_tokens(lifetime['h'])})\n"
+        f"  Output: {_fmt_tokens(lifetime['c'])}\n"
+        f"  Calls: {lifetime['n']}\n"
+        f"  Cost: ${lifetime_cost:.4f}"
+    )
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+
+# --- Finance: Statement Parser & Bill Tracking ---
+
+
+def _ddmmyy_to_mmddyyyy(d):
+    if not d:
+        return ""
+    d = d.strip()
+    parts = re.split(r'[/\-\.]', d)
+    if len(parts) >= 3:
+        dd, mm, yy = parts[0], parts[1], parts[2]
+        if len(dd) == 1:
+            dd = "0" + dd
+        if len(mm) == 1:
+            mm = "0" + mm
+        if len(yy) == 2:
+            yy = "20" + yy
+        elif len(yy) == 4:
+            yy = yy[2:]
+        return f"{mm}/{dd}/{yy}"
+    return d
+
+
+def _ddmmyy_to_iso(d):
+    if not d:
+        return ""
+    d = d.strip()
+    parts = re.split(r'[/\-\.]', d)
+    if len(parts) >= 3:
+        dd, mm, yy = parts[0], parts[1], parts[2]
+        dd, mm = int(dd), int(mm)
+        yy = int(yy)
+        if yy < 100:
+            yy += 2000
+        try:
+            return date(yy, mm, dd).isoformat()
+        except ValueError:
+            return ""
+    return ""
+
+
+def _fmt_ddmmyy(d):
+    if not d:
+        return ""
+    d = d.strip()
+    parts = re.split(r'[/\-\.]', d)
+    if len(parts) >= 2:
+        dd, mm = parts[0], parts[1]
+        if len(dd) == 1:
+            dd = "0" + dd
+        if len(mm) == 1:
+            mm = "0" + mm
+        return f"{dd}/{mm}"
+    return d
+
+
+def _load_rulebook(user_id):
+    rb = db.get_user_preference(user_id, "rulebook_md")
+    if rb:
+        return rb
+    try:
+        with open(os.path.join(os.path.dirname(__file__), "money_manager.md"), "r", encoding="utf-8") as f:
+            return f.read()
+    except Exception:
+        return ""
+
+
+def _get_valid_categories(user_id):
+    rb = _load_rulebook(user_id)
+    if not rb:
+        return [], []
+    expense_cats = set()
+    income_cats = set()
+    in_expense_table = False
+    in_income = False
+    for line in rb.split("\n"):
+        stripped = line.strip()
+        low = stripped.lower()
+        if low.startswith("## expense categories"):
+            in_expense_table = True
+            in_income = False
+            continue
+        if low.startswith("## income categories"):
+            in_expense_table = False
+            in_income = True
+            continue
+        if low.startswith("## ") and "categor" not in low:
+            in_expense_table = False
+            in_income = False
+            continue
+        if in_expense_table:
+            if stripped.startswith("|") and "---" not in stripped and "category" not in low:
+                parts = [p.strip() for p in stripped.split("|")[1:-1]]
+                if parts and parts[0] and not parts[0].startswith("-") and parts[0] != "\\---":
+                    expense_cats.add(parts[0])
+        if in_income:
+            if stripped and not stripped.startswith("#") and not stripped.startswith("|") and not stripped.startswith("---") and not stripped.startswith("\\---"):
+                cats = [c.strip() for c in stripped.split(",") if c.strip()]
+                for c in cats:
+                    if not c.startswith("-") and c != "\\---":
+                        income_cats.add(c)
+    if not expense_cats:
+        expense_cats = {"Food", "Social Life", "Self-development", "Transportation", "Holiday",
+                        "Household", "Health", "Education", "Gift", "Other", "Insurance",
+                        "Shopping", "Gaming", "Loan", "Income Tax"}
+    if not income_cats:
+        income_cats = {"Allowance", "Salary", "Bonus", "Investment", "Other / Reimbursement"}
+    return sorted(expense_cats), sorted(income_cats)
+
+
+def _validate_category(category, tx_type, expense_cats, income_cats):
+    if not category:
+        return False
+    cat = category.strip()
+    if tx_type == "Income":
+        return cat in income_cats
+    return cat in expense_cats or cat in income_cats
+
+
+def _extract_pdf_text(file_bytes):
+    text_parts = []
+    try:
+        import pdfplumber
+        import io
+        with pdfplumber.open(io.BytesIO(bytes(file_bytes))) as pdf:
+            for page in pdf.pages:
+                page_text = page.extract_text() or ""
+                if page_text:
+                    text_parts.append(page_text)
+    except Exception as e:
+        logger.error(f"pdfplumber extraction failed: {e}")
+        try:
+            import fitz
+            import io
+            doc = fitz.open(stream=bytes(file_bytes), filetype="pdf")
+            for page in doc:
+                text_parts.append(page.get_text())
+            doc.close()
+        except Exception as e2:
+            logger.error(f"PyMuPDF extraction failed: {e2}")
+            return ""
+    return "\n".join(text_parts)
+
+
+_CARD_PATTERNS = [
+    ("ocbc", r"\bocbc\b"),
+    ("uob ppv", r"\buob\s*ppv\b"),
+    ("uob", r"\buob\b"),
+    ("citi", r"\bciti(?:\s*rewards)?\b"),
+    ("dbs", r"\bdbs\b"),
+    ("sc", r"\bsc\s*simply\s*cash\b"),
+    ("youtrip", r"\byoutrip\b"),
+    ("maribank", r"\bmaribank\b"),
+]
+
+
+def _detect_card_name(text):
+    low = text.lower()
+    for name, pat in _CARD_PATTERNS:
+        if re.search(pat, low):
+            return name
+    return ""
+
+
+def _detect_card_last4(text):
+    m = re.search(r'\b(?:card|acct|account|no\.?)\s*[:#]?\s*(\d{4})\b', text, re.I)
+    if m:
+        return m.group(1)
+    m = re.search(r'\b\*{0,4}\s*(\d{4})\b', text)
+    if m:
+        return m.group(1)
+    return ""
+
+
+_ACCOUNT_ALIASES = {
+    "ocbc 365": "OCBC 365",
+    "ocbc": "OCBC 365",
+    "posb": "POSB",
+    "uob ppv": "UOB PPV",
+    "ppv": "UOB PPV",
+    "uob lady": "UOB Lady",
+    "lady": "UOB Lady",
+    "uob": "UOB PPV",
+    "citi rewards": "Citi Rewards (Amaze)",
+    "citi rewards (amaze)": "Citi Rewards (Amaze)",
+    "amaze": "Citi Rewards (Amaze)",
+    "citi": "Citi Rewards (Amaze)",
+    "dbs altitude": "DBS Altitude",
+    "altitude": "DBS Altitude",
+    "dbs": "POSB",
+    "sc simplycash": "SC SimplyCash",
+    "simplycash": "SC SimplyCash",
+    "sc": "SC SimplyCash",
+    "youtrip": "YouTrip",
+    "maribank": "MariBank",
+    "mari": "MariBank",
+}
+
+_DEFAULT_ACCOUNT_NAMES = [
+    "POSB", "UOB PPV", "Citi Rewards (Amaze)", "UOB Lady",
+    "DBS Altitude", "SC SimplyCash", "YouTrip", "OCBC 365", "MariBank",
+]
+
+
+def _get_account_names(user_id):
+    rb = _load_rulebook(user_id)
+    names = []
+    if rb:
+        m = re.search(r'##\s*Account Names\s*\n(.+?)(?:\n\s*\n|\n#|\Z)', rb, re.DOTALL | re.IGNORECASE)
+        if m:
+            line = m.group(1).strip().split("\n")[0].strip()
+            names = [n.strip() for n in line.split(",") if n.strip()]
+    if not names:
+        names = list(_DEFAULT_ACCOUNT_NAMES)
+    return names
+
+
+def _detect_account(text, card_name="", user_id=None):
+    account_names = _get_account_names(user_id) if user_id else []
+    if card_name:
+        key = card_name.strip().lower()
+        if key in _ACCOUNT_ALIASES:
+            mapped = _ACCOUNT_ALIASES[key]
+            if not account_names or mapped in account_names:
+                return mapped
+        for name in account_names:
+            if key == name.lower():
+                return name
+    low = (text or "").lower()
+    for key, account in sorted(_ACCOUNT_ALIASES.items(), key=lambda x: -len(x[0])):
+        if key in low:
+            if not account_names or account in account_names:
+                return account
+    for name in sorted(account_names, key=lambda x: -len(x)):
+        if name.lower() in low:
+            return name
+    return ""
+
+
+def _render_parse_session(session_id):
+    session = db.get_parse_session(session_id)
+    if not session:
+        return None, None
+    txs = db.get_parsed_transactions(session_id)
+    if not txs:
+        return "No transactions in this session.", None
+    lines = ["\U0001f4c4 Parsed Statement", "\u2501" * 23]
+    keyboard = []
+    for tx in txs:
+        if tx["confirmed"] == -1:
+            continue
+        is_unclear = tx["confidence"] == "low" and tx["confirmed"] != 1
+        if is_unclear:
+            icon = "\u2754"
+        elif tx["confirmed"] == 1:
+            icon = "\u2705"
+        else:
+            icon = "\u2705"
+        d = _fmt_ddmmyy(tx["date"]) if tx["date"] else "??/??"
+        if is_unclear and tx["amount"] == 0.0:
+            amt = "?"
+        else:
+            amt = f"${tx['amount']:.2f}"
+        tx_type = (tx.get("tx_type") or "Expense")
+        type_icon = "\U0001f4b9" if tx_type == "Income" else ""
+        lines.append(f"{icon} {d} {tx['merchant'][:28]:<28} {amt:>8} {type_icon}")
+        sub = []
+        if tx.get("account"):
+            sub.append(f"\U0001f4b3 {tx['account']}")
+        cat_str = tx.get("category") or ""
+        subcat = tx.get("subcategory") or ""
+        if cat_str:
+            if subcat:
+                sub.append(f"\u2192 {cat_str}/{subcat}")
+            else:
+                sub.append(f"\u2192 {cat_str}")
+        if tx_type == "Income":
+            sub.append("(Income)")
+        if sub:
+            lines.append(f"     {'  '.join(sub)}")
+    lines.append("\u2501" * 23)
+    visible = [t for t in txs if t["confirmed"] != -1]
+    n_conf = sum(1 for t in visible if t["confirmed"] == 1)
+    n_unclear = sum(1 for t in visible if t["confidence"] == "low" and t["confirmed"] != 1)
+    lines.append(f"\u2705 {n_conf} confirmed  \u2754 {n_unclear} unclear  /  {len(visible)} total")
+    keyboard.append([
+        InlineKeyboardButton("\u2705 Confirm All", callback_data=f"parse_confirm_all_{session_id}"),
+        InlineKeyboardButton("\u274c Cancel", callback_data=f"parse_cancel_{session_id}"),
+    ])
+    keyboard.append([
+        InlineKeyboardButton("\U0001f501 Retry", callback_data=f"parse_retry_{session_id}"),
+    ])
+    for tx in txs:
+        if tx["confirmed"] == -1:
+            continue
+        is_unclear = tx["confidence"] == "low" and tx["confirmed"] != 1
+        prefix = "\u2754" if is_unclear else "\u2705"
+        date_label = _fmt_ddmmyy(tx["date"]) if tx["date"] else "??/??"
+        if tx["confirmed"] == 1:
+            keyboard.append([
+                InlineKeyboardButton(f"{prefix} {date_label} {tx['merchant'][:15]}", callback_data="parse_noop"),
+                InlineKeyboardButton("Edit", callback_data=f"parse_edit_{tx['id']}"),
+                InlineKeyboardButton("Reject", callback_data=f"parse_reject_{tx['id']}"),
+            ])
+        elif is_unclear:
+            keyboard.append([
+                InlineKeyboardButton(f"{prefix} {tx['merchant'][:15]}", callback_data="parse_noop"),
+                InlineKeyboardButton("\U0001f50d Identify", callback_data=f"parse_identify_{tx['id']}"),
+                InlineKeyboardButton("Edit", callback_data=f"parse_edit_{tx['id']}"),
+                InlineKeyboardButton("Reject", callback_data=f"parse_reject_{tx['id']}"),
+            ])
+        else:
+            keyboard.append([
+                InlineKeyboardButton(f"{prefix} {date_label} {tx['merchant'][:15]}", callback_data="parse_noop"),
+                InlineKeyboardButton("Confirm", callback_data=f"parse_confirm_{tx['id']}"),
+                InlineKeyboardButton("Edit", callback_data=f"parse_edit_{tx['id']}"),
+                InlineKeyboardButton("Reject", callback_data=f"parse_reject_{tx['id']}"),
+            ])
+    return "\n".join(lines), InlineKeyboardMarkup(keyboard)
+
+
+def _generate_tsv(session_id):
+    txs = db.get_parsed_transactions(session_id)
+    rows = ["\t".join(["Date", "Account", "Category", "Subcategory", "Note", "Amount", "Income/Expense", "Description"])]
+    for tx in txs:
+        if tx["confirmed"] != 1:
+            continue
+        d = _ddmmyy_to_mmddyyyy(tx["date"])
+        category = (tx.get("category") or "").strip()
+        subcategory = (tx.get("subcategory") or "").strip()
+        account = (tx.get("account") or "").strip()
+        note = (tx.get("merchant") or "").strip()
+        amount = f"{tx['amount']:.2f}"
+        io = (tx.get("tx_type") or "Expense").strip().capitalize()
+        if io not in ("Expense", "Income"):
+            io = "Expense"
+        rows.append("\t".join([d, account, category, subcategory, note, amount, io, ""]))
+    return "\n".join(rows) + "\n"
+
+
+def _apply_correction(user_id, tx_id, text):
+    m = re.match(r'\s*([\w\s/]+?)\s*[:\-]\s*(.+)', text)
+    if not m:
+        return False, "Use format: `Category: Food` or `Subcategory: Groceries` or `Merchant: NTUC` or `Amount: 50` or `Date: 12/03/26` or `Account: OCBC 365` or `Type: Income`"
+    field = m.group(1).strip().lower()
+    value = m.group(2).strip()
+    field_map = {
+        "category": "category",
+        "cat": "category",
+        "subcategory": "subcategory",
+        "subcat": "subcategory",
+        "sub": "subcategory",
+        "merchant": "merchant",
+        "name": "merchant",
+        "amount": "amount",
+        "amt": "amount",
+        "date": "date",
+        "notes": "notes",
+        "note": "notes",
+        "account": "account",
+        "acc": "account",
+        "type": "tx_type",
+        "tx_type": "tx_type",
+        "income/expense": "tx_type",
+        "ie": "tx_type",
+    }
+    key = field_map.get(field)
+    if not key:
+        return False, f"Unknown field '{field}'. Try Category, Subcategory, Merchant, Amount, Date, Account, Type, or Notes."
+    tx = db.get_parsed_transaction(tx_id)
+    if not tx:
+        return False, "Transaction not found."
+    update = {key: value}
+    if key == "amount":
+        try:
+            update["amount"] = float(re.sub(r'[^\d.]', '', value))
+        except ValueError:
+            return False, "Amount must be a number."
+    if key == "category":
+        update["category"] = value
+    if key == "subcategory":
+        update["subcategory"] = value
+    if key == "merchant":
+        update["merchant"] = value
+    if key == "account":
+        normalized = _normalize_account(value, user_id)
+        if normalized:
+            update["account"] = normalized
+        else:
+            account_names = _get_account_names(user_id)
+            return False, f"Unknown account. Use one of: {', '.join(account_names)}"
+    if key == "tx_type":
+        v = value.lower().strip()
+        if v in ("income", "i"):
+            update["tx_type"] = "Income"
+        elif v in ("expense", "e"):
+            update["tx_type"] = "Expense"
+        else:
+            return False, "Type must be 'Income' or 'Expense'."
+    db.update_parsed_transaction(tx_id, **update)
+    if key == "category" and tx["merchant"]:
+        db.add_transaction_rule(user_id, tx["merchant"], value)
+        return True, "Noted! I'll remember that for next time."
+    if key == "merchant" and tx["category"]:
+        db.add_transaction_rule(user_id, value, tx["category"])
+        return True, "Noted! I'll remember that for next time."
+    return True, "\u2705 Updated."
+
+
+def _normalize_account(value, user_id=None):
+    if not value:
+        return ""
+    low = value.strip().lower()
+    account_names = _get_account_names(user_id) if user_id else []
+    for name in account_names:
+        if low == name.lower():
+            return name
+    if low in _ACCOUNT_ALIASES:
+        mapped = _ACCOUNT_ALIASES[low]
+        if not account_names or mapped in account_names:
+            return mapped
+    for name in account_names:
+        if low in name.lower():
+            return name
+    return ""
+
+
+async def handle_statement_parse(update, context, user_id, statement_text, override_msg=None, query=None):
+    if not statement_text or not statement_text.strip():
+        if override_msg:
+            await override_msg.edit_text("No statement text found. Paste your statement text or upload a .txt/.csv/.pdf file.")
+        elif update and update.effective_message:
+            await update.effective_message.reply_text("No statement text found. Paste your statement text or upload a .txt/.csv/.pdf file.")
+        return
+    import hashlib
+    raw_hash = hashlib.sha256(statement_text.encode("utf-8")).hexdigest()
+    existing = db.get_parse_session_by_hash(user_id, raw_hash)
+    confirmed_existing = [s for s in existing if s["status"] == "confirmed"]
+    if confirmed_existing and not override_msg:
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("\U0001f501 Re-parse", callback_data=f"parse_reparse_new"),
+             InlineKeyboardButton("\U0001f4c4 Show previous", callback_data=f"parse_show_{confirmed_existing[0]['id']}")],
+        ])
+        await update.effective_message.reply_text(
+            "This statement was already parsed and confirmed. Re-parse or view previous results?",
+            reply_markup=keyboard,
+        )
+        return
+    if override_msg:
+        busy = override_msg
+    else:
+        busy = await update.effective_message.reply_text("\U0001f9d1\u200d\U0001f4bb Parsing statement with AI...")
+    rulebook = _load_rulebook(user_id)
+    rules = db.get_transaction_rules(user_id)
+    if rules:
+        rule_lines = ["", "--- Learned Rules ---"]
+        for r in rules:
+            rule_lines.append(f"- {r['merchant_pattern']} -> {r['category']}")
+        rulebook = rulebook + "\n".join(rule_lines)
+    result = ai.parse_statement(statement_text, rulebook)
+    if result.get("error"):
+        await busy.edit_text(f"\u274c {result['error']}")
+        return
+    transactions = result.get("transactions", [])
+    unclear = result.get("unclear_items", [])
+    due_date = result.get("due_date", "")
+    if not transactions and not unclear:
+        await busy.edit_text("Could not extract any transactions from this statement. Try pasting the text more clearly.")
+        return
+    fallback_account = _detect_account(statement_text, user_id=user_id)
+    expense_cats, income_cats = _get_valid_categories(user_id)
+    learned_rules = {r["merchant_pattern"]: (r["category"], r.get("notes", "")) for r in db.get_transaction_rules(user_id)}
+    session_id = db.create_parse_session(user_id, statement_text)
+    seen_merchants = set()
+    auto_confirmed = 0
+    invalid_cats = []
+    for tx in transactions:
+        try:
+            conf = (tx.get("confidence") or "high").strip().lower()
+            merchant = (tx.get("merchant") or "").strip()
+            merchant_lower = merchant.lower()
+            tx_type = (tx.get("tx_type") or "Expense").strip().capitalize()
+            if tx_type not in ("Expense", "Income"):
+                tx_type = "Expense"
+            category = (tx.get("category") or "").strip()
+            subcategory = (tx.get("subcategory") or "").strip()
+            if merchant_lower in learned_rules and conf != "low":
+                learned_cat = learned_rules[merchant_lower][0]
+                if "/" in learned_cat and tx_type == "Expense":
+                    category, subcategory = learned_cat.split("/", 1)
+                    category = category.strip()
+                    subcategory = subcategory.strip()
+                else:
+                    category = learned_cat
+                    subcategory = ""
+                conf = "high"
+                auto_confirm = True
+            else:
+                auto_confirm = False
+            if category and not _validate_category(category, tx_type, expense_cats, income_cats):
+                invalid_cats.append((merchant, category, tx_type))
+                conf = "low"
+                auto_confirm = False
+            if conf == "low":
+                if merchant and merchant not in seen_merchants:
+                    db.add_parsed_transaction(
+                        session_id, user_id, merchant, 0.0, "", category, "low", "",
+                        account=(tx.get("account") or fallback_account),
+                        subcategory=subcategory,
+                        tx_type=tx_type,
+                    )
+                    seen_merchants.add(merchant)
+                continue
+            if merchant in seen_merchants:
+                continue
+            account = (tx.get("account") or "").strip() or fallback_account
+            amount = float(tx.get("amount", 0))
+            tx_id = db.add_parsed_transaction(
+                session_id, user_id,
+                merchant,
+                amount,
+                tx.get("date", ""),
+                category,
+                conf,
+                tx.get("notes", ""),
+                account=account,
+                subcategory=subcategory,
+                tx_type=tx_type,
+            )
+            if auto_confirm:
+                db.update_parsed_transaction(tx_id, confirmed=1)
+                auto_confirmed += 1
+            seen_merchants.add(merchant)
+        except (ValueError, TypeError):
+            continue
+    for item in unclear:
+        if isinstance(item, str):
+            m = item.strip()
+            if m and m not in seen_merchants:
+                db.add_parsed_transaction(
+                    session_id, user_id, m, 0.0, "", "", "low", "",
+                    account=fallback_account,
+                )
+                seen_merchants.add(m)
+    if auto_confirmed > 0:
+        await busy.edit_text(f"\u2705 {auto_confirmed} recurring transaction(s) auto-confirmed from learned rules.\n\U0001f9d1\u200d\U0001f4bb Checking unclear items...")
+    else:
+        await busy.edit_text("\U0001f50d Checking unclear items via web search...")
+    unclear_txs = [t for t in db.get_parsed_transactions(session_id) if t["confidence"] == "low" and t["confirmed"] != 1 and t["merchant"]]
+    identified_count = 0
+    for utx in unclear_txs[:8]:
+        try:
+            ident = ai.identify_merchant(utx["merchant"], _load_rulebook(user_id))
+            if not ident:
+                continue
+            ic = (ident.get("confidence") or "low").strip().lower()
+            if ic == "low":
+                continue
+            im = (ident.get("merchant") or utx["merchant"]).strip()
+            icat = (ident.get("category") or "").strip()
+            isub = (ident.get("subcategory") or "").strip()
+            iacct = (ident.get("account") or "").strip()
+            if iacct:
+                iacct = _normalize_account(iacct, user_id) or iacct
+            itype = (ident.get("tx_type") or "Expense").strip().capitalize()
+            if itype not in ("Expense", "Income"):
+                itype = "Expense"
+            if icat and not _validate_category(icat, itype, expense_cats, income_cats):
+                continue
+            update_fields = {"merchant": im, "category": icat, "subcategory": isub, "confidence": ic, "tx_type": itype}
+            if iacct:
+                update_fields["account"] = iacct
+            db.update_parsed_transaction(utx["id"], **update_fields)
+            db.add_transaction_rule(user_id, im, icat if not isub else f"{icat}/{isub}")
+            identified_count += 1
+        except Exception as e:
+            logger.error(f"Auto-identify failed for {utx['merchant']}: {e}")
+    text, keyboard = _render_parse_session(session_id)
+    prefix = ""
+    if auto_confirmed:
+        prefix += f"\u2705 {auto_confirmed} auto-confirmed (recurring)\n"
+    if identified_count:
+        prefix += f"\U0001f50d {identified_count} identified via web search\n"
+    if invalid_cats:
+        prefix += f"\u26a0\ufe0f {len(invalid_cats)} had invalid categories (flagged)\n"
+    if prefix:
+        await busy.edit_text(prefix, reply_markup=None)
+        await busy.reply_text(text, reply_markup=keyboard)
+    else:
+        await busy.edit_text(text, reply_markup=keyboard)
+    _parse_msg[user_id] = busy.message_id
+    if due_date:
+        try:
+            iso = _ddmmyy_to_iso(due_date)
+            if iso:
+                card_name = _detect_card_name(statement_text)
+                total = sum(float(t.get("amount", 0)) for t in transactions)
+                _pending_bill_from_parse[user_id] = {
+                    "card_name": card_name,
+                    "card_last4": _detect_card_last4(statement_text),
+                    "amount": round(total, 2),
+                    "due_date": iso,
+                    "session_id": session_id,
+                }
+                kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("\U0001f4be Save as bill", callback_data="parse_billsave"),
+                     InlineKeyboardButton("\u23ed Skip", callback_data="parse_billskip")],
+                ])
+                card_label = f"{card_name.upper()} " if card_name else ""
+                last4_label = f"({ _pending_bill_from_parse[user_id]['card_last4']}) " if _pending_bill_from_parse[user_id]["card_last4"] else ""
+                await update.effective_message.reply_text(
+                    f"\U0001f514 Detected due date: {_fmt_ddmmyy(due_date)}. Save as bill? [{card_label}{last4_label}${total:.2f}]",
+                    reply_markup=kb,
+                )
+        except Exception:
+            pass
+
+
+async def parse_statement(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    db.store_chat_id(user_id, update.effective_chat.id)
+    if user_id != OWNER_TELEGRAM_ID:
+        return
+    args = context.args
+    if args:
+        statement_text = " ".join(args)
+        await handle_statement_parse(update, context, user_id, statement_text)
+    else:
+        _pending_statement[user_id] = True
+        await update.message.reply_text(
+            "\U0001f4c4 Send me your statement now — paste text, or upload a .txt / .csv / .pdf file.\n\n"
+            "PDF bank/credit card statements are auto-read.\n"
+            "Send /cancel to abort."
+        )
+
+
+async def handle_finance_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    db.store_chat_id(user_id, update.effective_chat.id)
+    if user_id != OWNER_TELEGRAM_ID:
+        return
+    doc = update.message.document
+    if not doc:
+        return
+    fname = (doc.file_name or "").lower()
+    is_text = fname.endswith(".txt") or fname.endswith(".csv")
+    is_pdf = fname.endswith(".pdf")
+    if not is_text and not is_pdf:
+        return
+    if doc.file_size and doc.file_size > 10 * 1024 * 1024:
+        await update.message.reply_text("File too large (max 10MB).")
+        return
+    busy = await update.message.reply_text("\U0001f4c4 Reading file...")
+    try:
+        file = await doc.get_file()
+        file_bytes = await file.download_as_bytearray()
+    except Exception as e:
+        logger.error(f"Document download failed: {e}")
+        await busy.edit_text("Could not download that file.")
+        return
+    if is_pdf:
+        await busy.edit_text("\U0001f4c4 Extracting text from PDF...")
+        content = _extract_pdf_text(file_bytes)
+        if not content.strip():
+            await busy.edit_text("Could not extract any text from this PDF. It may be a scanned image (OCR not supported) or empty.")
+            return
+    else:
+        try:
+            content = bytes(file_bytes).decode("utf-8")
+        except UnicodeDecodeError:
+            content = bytes(file_bytes).decode("latin-1", errors="replace")
+    _pending_statement.pop(user_id, None)
+    if user_id in _merge_buffer:
+        _merge_buffer[user_id].append(content)
+        n = len(_merge_buffer[user_id])
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("\u2705 Parse all now", callback_data="merge_parse_now")],
+            [InlineKeyboardButton("\u274c Cancel merge", callback_data="merge_cancel")],
+        ])
+        await busy.edit_text(
+            f"\U0001f4e6 Added to merge buffer ({n} statement(s) buffered).\n"
+            f"Upload more files, or tap Parse all now to process them together as one session.",
+            reply_markup=kb,
+        )
+        return
+    await busy.delete()
+    await handle_statement_parse(update, context, user_id, content)
+
+
+async def merge_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    db.store_chat_id(user_id, update.effective_chat.id)
+    if user_id != OWNER_TELEGRAM_ID:
+        return
+    _merge_buffer[user_id] = []
+    await update.message.reply_text(
+        "\U0001f4e6 Merge mode ON.\n\n"
+        "Upload your statements now (.pdf / .txt / .csv) — one by one or all at once.\n"
+        "When done, tap *Parse all now* (or send /mergeparse) to process them together as one session.\n"
+        "Send /mergecancel to abort."
+    )
+
+
+async def merge_parse_now(update_or_query, context, user_id=None):
+    if hasattr(update_or_query, 'answer') and hasattr(update_or_query, 'edit_message_text'):
+        query = update_or_query
+        await query.answer()
+        uid = query.from_user.id
+        if uid != OWNER_TELEGRAM_ID:
+            return
+        buffers = _merge_buffer.pop(uid, [])
+        if not buffers:
+            await query.edit_message_text("No statements in merge buffer.")
+            return
+        await query.edit_message_text(f"\U0001f4e6 Parsing {len(buffers)} merged statement(s)...")
+        combined = "\n\n--- STATEMENT BREAK ---\n\n".join(buffers)
+        await handle_statement_parse(None, context, uid, combined, override_msg=query.message)
+    else:
+        update = update_or_query
+        uid = update.effective_user.id
+        if uid != OWNER_TELEGRAM_ID:
+            return
+        buffers = _merge_buffer.pop(uid, [])
+        if not buffers:
+            await update.message.reply_text("No statements in merge buffer. Use /merge first, then upload files.")
+            return
+        msg = await update.message.reply_text(f"\U0001f4e6 Parsing {len(buffers)} merged statement(s)...")
+        combined = "\n\n--- STATEMENT BREAK ---\n\n".join(buffers)
+        await handle_statement_parse(update, context, uid, combined, override_msg=msg)
+
+
+async def merge_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    data = query.data
+    uid = query.from_user.id
+    if uid != OWNER_TELEGRAM_ID:
+        await query.answer()
+        return
+    if data == "merge_parse_now":
+        await merge_parse_now(query, context)
+    elif data == "merge_cancel":
+        await query.answer()
+        n = len(_merge_buffer.pop(uid, []))
+        await query.edit_message_text(f"\u274c Merge cancelled ({n} statement(s) discarded).")
+
+
+async def merge_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id != OWNER_TELEGRAM_ID:
+        return
+    n = len(_merge_buffer.pop(user_id, []))
+    await update.message.reply_text(f"\u274c Merge cancelled ({n} statement(s) discarded).")
+
+
+async def parse_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    if user_id != OWNER_TELEGRAM_ID:
+        return
+    data = query.data
+    if data == "parse_noop":
+        return
+    if data == "parse_reparse_new":
+        _pending_statement[user_id] = True
+        await query.edit_message_text("Send the statement text again to re-parse.")
+        return
+    if data.startswith("parse_show_"):
+        sid = int(data.split("_")[2])
+        text, kb = _render_parse_session(sid)
+        if text:
+            await query.edit_message_text(text, reply_markup=kb)
+        return
+    if data.startswith("parse_confirm_all_"):
+        sid = int(data.split("_")[3])
+        session = db.get_parse_session(sid)
+        if not session:
+            await query.edit_message_text("Session not found.")
+            return
+        txs = db.get_parsed_transactions(sid)
+        for tx in txs:
+            if tx["confirmed"] == -1:
+                continue
+            if tx["confidence"] == "low":
+                continue
+            db.update_parsed_transaction(tx["id"], confirmed=1)
+        tsv = _generate_tsv(sid)
+        db.update_parse_session_status(sid, "confirmed")
+        n = sum(1 for t in txs if t["confirmed"] == 1 or (t["confirmed"] != -1 and t["confidence"] != "low"))
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".tsv", delete=False, encoding="utf-8") as f:
+            f.write(tsv)
+            tmp_path = f.name
+        try:
+            with open(tmp_path, "rb") as f:
+                await context.bot.send_document(
+                    chat_id=query.message.chat_id,
+                    document=f,
+                    filename="import.tsv",
+                    caption=f"\U0001f4e5 {n} transactions exported. Import this into your expense manager.",
+                )
+        finally:
+            os.unlink(tmp_path)
+        unclear_left = sum(1 for t in db.get_parsed_transactions(sid) if t["confidence"] == "low" and t["confirmed"] != -1)
+        msg = f"\u2705 Confirmed {n} transaction(s). TSV file sent above. Session marked as confirmed."
+        if unclear_left:
+            msg += f"\n\u26a0\ufe0f {unclear_left} unclear item(s) skipped (review them individually)."
+        await query.edit_message_text(msg)
+        _parse_msg.pop(user_id, None)
+        return
+    if data.startswith("parse_cancel_"):
+        sid = int(data.split("_")[2])
+        db.update_parse_session_status(sid, "cancelled")
+        db.delete_parse_session(sid)
+        _parse_msg.pop(user_id, None)
+        await query.edit_message_text("\u274c Parse session cancelled.")
+        return
+    if data.startswith("parse_retry_"):
+        sid = int(data.split("_")[2])
+        db.update_parse_session_status(sid, "cancelled")
+        db.delete_parse_session(sid)
+        _parse_statement[user_id] = True
+        _parse_msg.pop(user_id, None)
+        await query.edit_message_text("\U0001f501 Session cleared. Send the statement text again (paste or upload a file).")
+        return
+    if data.startswith("parse_confirm_"):
+        tx_id = int(data.split("_")[2])
+        db.update_parsed_transaction(tx_id, confirmed=1)
+        tx = db.get_parsed_transaction(tx_id)
+        if tx:
+            text, kb = _render_parse_session(tx["session_id"])
+            if text:
+                await query.edit_message_text(text, reply_markup=kb)
+        return
+    if data.startswith("parse_reject_"):
+        tx_id = int(data.split("_")[2])
+        tx = db.get_parsed_transaction(tx_id)
+        if not tx:
+            return
+        db.update_parsed_transaction(tx_id, confirmed=-1)
+        text, kb = _render_parse_session(tx["session_id"])
+        if text:
+            await query.edit_message_text(text, reply_markup=kb)
+        return
+    if data.startswith("parse_edit_"):
+        tx_id = int(data.split("_")[2])
+        _parse_edit[user_id] = tx_id
+        account_names = _get_account_names(user_id)
+        await query.edit_message_text(
+            "Send the correction as:\n"
+            "`Category: Food` or `Subcategory: Groceries` or `Merchant: NTUC`\n"
+            "or `Amount: 50` or `Date: 12/03/26` or `Account: OCBC 365`\n"
+            "or `Type: Income` (or `Type: Expense`)\n\n"
+            f"Accounts: {', '.join(account_names)}",
+            parse_mode="Markdown",
+        )
+        return
+    if data.startswith("parse_identify_"):
+        tx_id = int(data.split("_")[2])
+        tx = db.get_parsed_transaction(tx_id)
+        if not tx:
+            await query.answer("Transaction not found.", show_alert=True)
+            return
+        await query.edit_message_text(f"\U0001f50d Searching the web to identify \"{tx['merchant']}\"...")
+        rulebook = _load_rulebook(user_id)
+        result = ai.identify_merchant(tx["merchant"], rulebook)
+        if not result:
+            await query.edit_message_text(f"Could not identify \"{tx['merchant']}\". Try editing it manually.")
+            return
+        conf = (result.get("confidence") or "low").strip().lower()
+        new_merchant = (result.get("merchant") or tx["merchant"]).strip()
+        new_category = (result.get("category") or "").strip()
+        new_subcategory = (result.get("subcategory") or "").strip()
+        new_account = (result.get("account") or "").strip()
+        if new_account:
+            new_account = _normalize_account(new_account, user_id) or new_account
+        new_tx_type = (result.get("tx_type") or "Expense").strip().capitalize()
+        if new_tx_type not in ("Expense", "Income"):
+            new_tx_type = "Expense"
+        description = (result.get("description") or "").strip()
+        if conf != "low" and new_category:
+            update_fields = {"merchant": new_merchant, "category": new_category, "subcategory": new_subcategory, "tx_type": new_tx_type, "confidence": conf}
+            if new_account:
+                update_fields["account"] = new_account
+            db.update_parsed_transaction(tx_id, **update_fields)
+            db.add_transaction_rule(user_id, new_merchant, new_category)
+            note_line = f"\U0001f50d Identified: {description}\n" if description else ""
+            acct_line = f"\nAccount: {new_account}" if new_account else ""
+            subcat_line = f"\nSubcategory: {new_subcategory}" if new_subcategory else ""
+            type_line = f"\nType: {new_tx_type}"
+            cat_display = f"{new_category}/{new_subcategory}" if new_subcategory else new_category
+            await query.edit_message_text(
+                f"{note_line}\u2705 Identified as: {new_merchant}\nCategory: {cat_display}{acct_line}{type_line}\nConfidence: {conf}\n\nNoted! I'll remember that for next time.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("\u2190 Back to session", callback_data=f"parse_show_{tx['session_id']}"),
+                ]]),
+            )
+        else:
+            note_line = f"\n\U0001f4ac {description}" if description else ""
+            await query.edit_message_text(
+                f"Could not confidently identify \"{tx['merchant']}\".{note_line}\n\nTry editing it manually with the Edit button.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("\u2190 Back to session", callback_data=f"parse_show_{tx['session_id']}"),
+                ]]),
+            )
+        return
+    if data == "parse_billsave":
+        pending = _pending_bill_from_parse.pop(user_id, None)
+        if not pending:
+            await query.edit_message_text("No pending bill.")
+            return
+        db.add_bill(user_id, pending["card_name"], pending["amount"], pending["due_date"], pending["card_last4"])
+        await query.edit_message_text(f"\u2705 Saved as bill: ${pending['amount']:.2f} due {_fmt_ddmmyy_to_display(pending['due_date'])}")
+        return
+    if data == "parse_billskip":
+        _pending_bill_from_parse.pop(user_id, None)
+        await query.edit_message_text("\u23ed Skipped saving as bill.")
+        return
+
+
+def _fmt_ddmmyy_to_display(iso_date):
+    if not iso_date:
+        return ""
+    try:
+        d = date.fromisoformat(iso_date)
+        return d.strftime("%d/%m/%y")
+    except Exception:
+        return iso_date
+
+
+async def add_bill(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    db.store_chat_id(user_id, update.effective_chat.id)
+    if user_id != OWNER_TELEGRAM_ID:
+        return
+    args = context.args
+    if not args:
+        await update.message.reply_text(
+            "Usage: `/addbill OCBC 2097 400 6 May`\n"
+            "or: `/addbill OCBC $400 due 6/5`",
+            parse_mode="Markdown",
+        )
+        return
+    text = " ".join(args)
+    busy = await update.message.reply_text("\U0001f9d1\u200d\U0001f4bb Parsing bill input...")
+    result = ai.parse_bill_input(text)
+    if result.get("error"):
+        await busy.edit_text(result["error"])
+        return
+    iso = _ddmmyy_to_iso(result["due_date"])
+    if not iso:
+        await busy.edit_text("Could not parse the due date. Try: `/addbill OCBC 2097 400 6 May`")
+        return
+    _pending_bill[user_id] = {
+        "card_name": result["card_name"],
+        "card_last4": result["card_last4"],
+        "amount": float(result["amount"]),
+        "due_date": iso,
+    }
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("\u2705 Confirm", callback_data="bill_confirm"),
+         InlineKeyboardButton("\u274c Cancel", callback_data="bill_cancel")],
+    ])
+    await busy.edit_text(
+        f"Add this bill?\n\n"
+        f"\U0001f4b3 Card: {result['card_name']} {result['card_last4']}\n"
+        f"\U0001f4b0 Amount: ${float(result['amount']):.2f}\n"
+        f"\U0001f4c5 Due: {_fmt_ddmmyy_to_display(iso)}",
+        reply_markup=keyboard,
+    )
+
+
+async def bill_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    if user_id != OWNER_TELEGRAM_ID:
+        return
+    data = query.data
+    if data == "bill_confirm":
+        pending = _pending_bill.pop(user_id, None)
+        if not pending:
+            await query.edit_message_text("No pending bill.")
+            return
+        db.add_bill(user_id, pending["card_name"], pending["amount"], pending["due_date"], pending["card_last4"])
+        if pending.get("card_last4"):
+            db.add_card(user_id, pending["card_name"], pending["card_last4"])
+        await query.edit_message_text(
+            f"\u2705 Added: {pending['card_name'].upper()} (${pending['amount']:.2f} due {_fmt_ddmmyy_to_display(pending['due_date'])})"
+        )
+        return
+    if data == "bill_cancel":
+        _pending_bill.pop(user_id, None)
+        await query.edit_message_text("\u274c Bill addition cancelled.")
+        return
+
+
+def _render_bills(user_id):
+    bills = db.get_bills(user_id)
+    if not bills:
+        return None, None
+    today = date.today()
+    lines = ["\U0001f4cb Upcoming Bills", "\u2501" * 23]
+    for b in bills:
+        try:
+            due = date.fromisoformat(b["due_date"])
+        except Exception:
+            due = today
+        days_left = (due - today).days
+        if days_left < 0:
+            icon = "\u26a0\ufe0f"
+            when = f"overdue {abs(days_left)}d"
+        elif days_left < 7:
+            icon = "\U0001f534"
+            when = f"{days_left}d left"
+        elif days_left < 30:
+            icon = "\U0001f7e1"
+            when = f"{days_left}d left"
+        else:
+            icon = "\U0001f7e2"
+            when = f"{days_left}d left"
+        last4 = b.get("card_last4") or ""
+        if not last4:
+            last4 = db.get_card_last4(user_id, b["card_name"])
+        last4_str = f" **{last4}**" if last4 else ""
+        lines.append(f"{icon} #{b['id']} {b['card_name'].upper()}{last4_str}  ${b['amount']:.2f}  \u2014 due {due.strftime('%b %-d')} ({when})")
+    lines.append("\u2501" * 23)
+    total = sum(b["amount"] for b in bills)
+    lines.append(f"Total: ${total:.2f}")
+    lines.append("Tap a number to mark that bill as paid:")
+    keyboard = []
+    row = []
+    for b in bills:
+        row.append(InlineKeyboardButton(str(b["id"]), callback_data=f"billpay_{b['id']}"))
+        if len(row) >= 8:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    return "\n".join(lines), InlineKeyboardMarkup(keyboard)
+
+
+async def list_bills(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    db.store_chat_id(user_id, update.effective_chat.id)
+    if user_id != OWNER_TELEGRAM_ID:
+        return
+    text, kb = _render_bills(user_id)
+    if not text:
+        await update.message.reply_text("\U0001f4cb No unpaid bills. You're all caught up!")
+        return
+    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=kb)
+
+
+async def pay_bill_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    db.store_chat_id(user_id, update.effective_chat.id)
+    if user_id != OWNER_TELEGRAM_ID:
+        return
+    args = context.args
+    if not args or not args[0].isdigit():
+        await update.message.reply_text("Usage: `/pay <bill_id>`", parse_mode="Markdown")
+        return
+    bill_id = int(args[0])
+    bill = db.get_bill(bill_id)
+    if not bill or bill["user_id"] != user_id:
+        await update.message.reply_text("Bill not found.")
+        return
+    if bill["paid"]:
+        await update.message.reply_text("That bill is already paid.")
+        return
+    db.pay_bill(bill_id)
+    try:
+        due = date.fromisoformat(bill["due_date"]).strftime("%b %-d")
+    except Exception:
+        due = bill["due_date"]
+    await update.message.reply_text(f"\u2705 Paid: {bill['card_name'].upper()} (${bill['amount']:.2f} due {due})")
+
+
+async def remove_bill_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    db.store_chat_id(user_id, update.effective_chat.id)
+    if user_id != OWNER_TELEGRAM_ID:
+        return
+    args = context.args
+    if not args or not args[0].isdigit():
+        await update.message.reply_text("Usage: `/removebill <bill_id>`", parse_mode="Markdown")
+        return
+    bill_id = int(args[0])
+    bill = db.get_bill(bill_id)
+    if not bill or bill["user_id"] != user_id:
+        await update.message.reply_text("Bill not found.")
+        return
+    db.remove_bill(bill_id)
+    await update.message.reply_text(f"\U0001f5d1 Removed bill #{bill_id}: {bill['card_name'].upper()} (${bill['amount']:.2f})")
+
+
+async def bill_pay_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    if user_id != OWNER_TELEGRAM_ID:
+        return
+    data = query.data
+    if data.startswith("billpay_"):
+        bill_id = int(data.split("_")[1])
+        bill = db.get_bill(bill_id)
+        if not bill or bill["user_id"] != user_id:
+            await query.edit_message_text("Bill not found.")
+            return
+        db.pay_bill(bill_id)
+        try:
+            due = date.fromisoformat(bill["due_date"]).strftime("%b %-d")
+        except Exception:
+            due = bill["due_date"]
+        await query.answer(f"Paid: {bill['card_name'].upper()} ${bill['amount']:.2f}", show_alert=False)
+        await query.edit_message_text(f"\u2705 Paid: {bill['card_name'].upper()} (${bill['amount']:.2f} due {due})")
+        remaining = db.get_bills(user_id)
+        if remaining:
+            rtext, rkb = _render_bills(user_id)
+            if rtext:
+                await context.bot.send_message(chat_id=query.message.chat_id, text=rtext, parse_mode="Markdown", reply_markup=rkb)
+        else:
+            await context.bot.send_message(chat_id=query.message.chat_id, text="\U0001f4cb All bills paid. You're all caught up!")
+        return
+    if data.startswith("billdue_yes_"):
+        bill_id = int(data.split("_")[2])
+        bill = db.get_bill(bill_id)
+        if not bill or bill["user_id"] != user_id:
+            await query.edit_message_text("Bill not found.")
+            return
+        db.pay_bill(bill_id)
+        await query.edit_message_text(f"\u2705 Marked as paid: {bill['card_name'].upper()} ${bill['amount']:.2f}")
+        return
+    if data.startswith("billdue_no_"):
+        bill_id = int(data.split("_")[2])
+        bill = db.get_bill(bill_id)
+        if not bill or bill["user_id"] != user_id:
+            await query.edit_message_text("Bill not found.")
+            return
+        try:
+            due = date.fromisoformat(bill["due_date"]).strftime("%b %-d")
+        except Exception:
+            due = bill["due_date"]
+        await query.edit_message_text(f"\u23f3 OK, I'll remind you again tomorrow. ({bill['card_name'].upper()} ${bill['amount']:.2f} due {due})")
+        return
+
+
+async def add_card_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    db.store_chat_id(user_id, update.effective_chat.id)
+    if user_id != OWNER_TELEGRAM_ID:
+        return
+    args = context.args
+    if not args or len(args) < 2:
+        await update.message.reply_text(
+            "Usage: `/addcard <card_name> <last4>`\n"
+            "Example: `/addcard CITI 9999`\n"
+            "If the card exists, its last 4 digits are updated. If not, a new card is added.",
+            parse_mode="Markdown",
+        )
+        return
+    card_name = args[0].strip()
+    last4 = args[1].strip()
+    if not re.fullmatch(r'\d{4}', last4):
+        await update.message.reply_text("Last 4 digits must be exactly 4 numbers. Example: `/addcard CITI 9999`", parse_mode="Markdown")
+        return
+    existing = db.get_card(user_id, card_name)
+    db.add_card(user_id, card_name, last4)
+    if existing:
+        await update.message.reply_text(f"\u2705 Updated card {card_name.upper()} \u2192 last 4: **{last4}**", parse_mode="Markdown")
+    else:
+        await update.message.reply_text(f"\u2705 Added card {card_name.upper()} with last 4: **{last4}**", parse_mode="Markdown")
+
+
+async def list_cards(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    db.store_chat_id(user_id, update.effective_chat.id)
+    if user_id != OWNER_TELEGRAM_ID:
+        return
+    cards = db.get_cards(user_id)
+    if not cards:
+        await update.message.reply_text("\U0001f4b3 No cards saved. Use `/addcard <name> <last4>` to add one.", parse_mode="Markdown")
+        return
+    lines = ["\U0001f4b3 Saved Cards", "\u2501" * 23]
+    for c in cards:
+        last4 = c["card_last4"] or "(no last4)"
+        lines.append(f"{c['card_name'].upper()}  \u2192  **{last4}**")
+    lines.append("\u2501" * 23)
+    lines.append("Used in /bills to show the last 4 digits.")
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+async def check_bill_reminders(context: ContextTypes.DEFAULT_TYPE):
+    today = date.today()
+    chat_id_str = db.get_user_preference(OWNER_TELEGRAM_ID, "chat_id")
+    if not chat_id_str:
+        return
+    chat_id = int(chat_id_str)
+    for bill in db.get_bills_due_today(OWNER_TELEGRAM_ID):
+        last4 = bill.get("card_last4") or ""
+        if not last4:
+            last4 = db.get_card_last4(OWNER_TELEGRAM_ID, bill["card_name"])
+        last4_str = f" {last4}" if last4 else ""
+        try:
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("\u2705 Yes, paid", callback_data=f"billdue_yes_{bill['id']}"),
+                 InlineKeyboardButton("\u23f3 Not yet", callback_data=f"billdue_no_{bill['id']}")],
+            ])
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"\U0001f514 Is {bill['card_name'].upper()}{last4_str} - ${bill['amount']:.2f} paid?",
+                reply_markup=kb,
+            )
+            db.mark_bill_notified_today(bill["id"])
+        except Exception as e:
+            logger.error(f"Bill due-today notification failed: {e}")
+    for bill in db.get_bills_due_soon(OWNER_TELEGRAM_ID, days=3):
+        try:
+            due = date.fromisoformat(bill["due_date"]).strftime("%b %-d")
+        except Exception:
+            due = bill["due_date"]
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"\U0001f514 Bill reminder: {bill['card_name'].upper()} ${bill['amount']:.2f} due {due}",
+            )
+            db.mark_bill_notified(bill["id"])
+        except Exception as e:
+            logger.error(f"Bill reminder send failed: {e}")
+    for reminder in db.get_monthly_reminders_due(OWNER_TELEGRAM_ID, today.day):
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=reminder["message"])
+            db.mark_monthly_notified(reminder["id"], today.strftime("%Y-%m"))
+        except Exception as e:
+            logger.error(f"Monthly reminder send failed: {e}")
+
+
+async def cancel_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    _pending_statement.pop(user_id, None)
+    _parse_edit.pop(user_id, None)
+    _pending_bill.pop(user_id, None)
+    _pending_bill_from_parse.pop(user_id, None)
+    await update.message.reply_text("\u274c Cancelled.")
+
+
+async def reload_rulebook(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    db.store_chat_id(user_id, update.effective_chat.id)
+    if user_id != OWNER_TELEGRAM_ID:
+        return
+    rb_path = os.path.join(os.path.dirname(__file__), "money_manager.md")
+    if not os.path.exists(rb_path):
+        await update.message.reply_text("money_manager.md not found in the project folder.")
+        return
+    try:
+        with open(rb_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        db.set_user_preference(user_id, "rulebook_md", content)
+        account_names = _get_account_names(user_id)
+        await update.message.reply_text(
+            f"\u2705 Rulebook reloaded from money_manager.md.\n"
+            f"Account names: {', '.join(account_names)}",
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        await update.message.reply_text(f"Could not reload rulebook: {e}")
+
+
+async def list_rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    db.store_chat_id(user_id, update.effective_chat.id)
+    if user_id != OWNER_TELEGRAM_ID:
+        return
+    rules = db.get_transaction_rules(user_id)
+    if not rules:
+        await update.message.reply_text(
+            "\U0001f4dc No learned rules yet.\n\n"
+            "Rules are added automatically when you:\n"
+            "- Correct a transaction's category (Edit)\n"
+            "- Tap \U0001f50d Identify on an unclear merchant"
+        )
+        return
+    lines = ["\U0001f4dc Learned Merchant Rules", "\u2501" * 23]
+    keyboard = []
+    for r in rules:
+        lines.append(f"#{r['id']}  {r['merchant_pattern']}  \u2192  {r['category']}")
+    lines.append("\u2501" * 23)
+    lines.append(f"{len(rules)} rule(s). Tap \U0001f5d1 to delete a rule.")
+    for r in rules:
+        keyboard.append([
+            InlineKeyboardButton(f"{r['merchant_pattern']} \u2192 {r['category']}", callback_data="rule_noop"),
+            InlineKeyboardButton("\U0001f5d1", callback_data=f"delrule_{r['id']}"),
+        ])
+    await update.message.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def delrule_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    if user_id != OWNER_TELEGRAM_ID:
+        return
+    data = query.data
+    if data == "rule_noop":
+        return
+    if data.startswith("delrule_"):
+        rule_id = int(data.split("_")[1])
+        db.delete_transaction_rule(rule_id)
+        rules = db.get_transaction_rules(user_id)
+        if not rules:
+            await query.edit_message_text("\u2705 Rule deleted. No rules left.")
+            return
+        lines = ["\U0001f4dc Learned Merchant Rules", "\u2501" * 23]
+        keyboard = []
+        for r in rules:
+            lines.append(f"#{r['id']}  {r['merchant_pattern']}  \u2192  {r['category']}")
+        lines.append("\u2501" * 23)
+        lines.append(f"{len(rules)} rule(s). Tap \U0001f5d1 to delete a rule.")
+        for r in rules:
+            keyboard.append([
+                InlineKeyboardButton(f"{r['merchant_pattern']} \u2192 {r['category']}", callback_data="rule_noop"),
+                InlineKeyboardButton("\U0001f5d1", callback_data=f"delrule_{r['id']}"),
+            ])
+        await query.edit_message_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(keyboard))
+
+
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Update {update} caused error {context.error}")
+    err = context.error
+    msg = str(err) if err else "Something went wrong."
+    friendly = None
+    if "rate limit" in msg.lower() or "ai is temporarily unavailable" in msg.lower():
+        friendly = msg
+    elif "daily request limit" in msg.lower():
+        friendly = msg
     if update and update.effective_message:
-        msg = str(context.error)
-        if "daily request limit" in msg.lower():
-            await update.effective_message.reply_text(msg)
-        else:
-            await update.effective_message.reply_text("Something went wrong. Try again later.")
+        try:
+            if friendly:
+                await update.effective_message.reply_text(friendly)
+            else:
+                await update.effective_message.reply_text("Something went wrong. Try again later.")
+        except Exception:
+            pass
 
 
 def create_app(token: str):
@@ -2685,6 +4231,8 @@ def create_app(token: str):
     app.add_handler(CommandHandler("import", import_recipe))
     app.add_handler(CommandHandler("batch", batch_start))
     app.add_handler(CommandHandler("random", random_ingredient))
+    app.add_handler(CommandHandler("randomreset", random_reset))
+    app.add_handler(CommandHandler("tokens", tokens_command))
     app.add_handler(CommandHandler("cookmode", cookmode))
     app.add_handler(CommandHandler("cook", cookmode))  # alias
     app.add_handler(CallbackQueryHandler(elaborate_callback, pattern="^elaborate_[0-4]$"))
@@ -2698,14 +4246,40 @@ def create_app(token: str):
     app.add_handler(CallbackQueryHandler(cook_from_recipe_callback, pattern="^cook_recipe$"))
     app.add_handler(CallbackQueryHandler(export_batch_callback, pattern="^export_batch$"))
     app.add_handler(CallbackQueryHandler(random_regenerate_callback, pattern="^random_regenerate$"))
+    app.add_handler(CallbackQueryHandler(random_switch_callback, pattern="^random_switch$"))
     app.add_handler(CallbackQueryHandler(delete_recipe_callback, pattern="^delrecipe_"))
     app.add_handler(CallbackQueryHandler(view_recipe_callback, pattern="^viewrecipe_"))
     app.add_handler(CallbackQueryHandler(shop_callback, pattern="^shop_"))
     app.add_handler(CallbackQueryHandler(receipt_confirm_callback, pattern="^receipt_confirm$"))
+    app.add_handler(CommandHandler("parse", parse_statement))
+    app.add_handler(CommandHandler("addbill", add_bill))
+    app.add_handler(CommandHandler("bills", list_bills))
+    app.add_handler(CommandHandler("pay", pay_bill_cmd))
+    app.add_handler(CommandHandler("removebill", remove_bill_cmd))
+    app.add_handler(CommandHandler("addcard", add_card_cmd))
+    app.add_handler(CommandHandler("cards", list_cards))
+    app.add_handler(CommandHandler("reloadrulebook", reload_rulebook))
+    app.add_handler(CommandHandler("listrules", list_rules))
+    app.add_handler(CommandHandler("merge", merge_command))
+    app.add_handler(CommandHandler("mergeparse", merge_parse_now))
+    app.add_handler(CommandHandler("mergecancel", merge_cancel))
+    app.add_handler(CommandHandler("cancel", cancel_pending))
+    app.add_handler(CallbackQueryHandler(parse_callback, pattern="^parse_"))
+    app.add_handler(CallbackQueryHandler(bill_callback, pattern="^bill_(confirm|cancel)$"))
+    app.add_handler(CallbackQueryHandler(bill_pay_callback, pattern="^bill(pay|due_yes|due_no)_"))
+    app.add_handler(CallbackQueryHandler(delrule_callback, pattern="^(delrule_|rule_noop$)"))
+    app.add_handler(CallbackQueryHandler(merge_callback, pattern="^merge_"))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_finance_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
 
     app.add_error_handler(error_handler)
+
+    import datetime as _dt
+    try:
+        app.job_queue.run_daily(check_bill_reminders, time=_dt.time(hour=9, minute=0))
+    except Exception as e:
+        logger.error(f"Could not schedule bill reminder job: {e}")
 
     return app

@@ -1,7 +1,6 @@
 import json
 import base64
 import re
-import time
 import logging
 import html
 import html.parser
@@ -24,30 +23,9 @@ groq_client = OpenAI(
 
 logger = logging.getLogger(__name__)
 
-# Global daily request tracking
 _daily_count = 0
 _daily_date = date.today()
 DAILY_LIMIT = 1500
-WARN_AT = 1400
-
-# Per-user daily request tracking
-_user_daily_count = {}
-_user_daily_date = date.today()
-USER_DAILY_LIMIT = 1500
-
-
-def check_daily_limit(user_id):
-    global _user_daily_date, _user_daily_count
-    today = date.today()
-    if today != _user_daily_date:
-        _user_daily_count = {}
-        _user_daily_date = today
-    if user_id == OWNER_TELEGRAM_ID:
-        return
-    _user_daily_count.setdefault(user_id, 0)
-    _user_daily_count[user_id] += 1
-    if _user_daily_count[user_id] > USER_DAILY_LIMIT:
-        raise RuntimeError("You've reached your daily request limit (1,500). Try again tomorrow.")
 
 
 def _extract_json_array(text):
@@ -85,40 +63,47 @@ def _ai_call(prompt, system_msg, temperature=0.5, max_tokens=600, return_usage=F
 
     msg = [{"role": "system", "content": system_msg}, {"role": "user", "content": prompt}]
 
-    for attempt in range(4):
+    try:
+        resp = client.chat.completions.create(
+            model=DEEPSEEK_MODEL,
+            messages=msg,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+    except Exception as e:
+        err_str = str(e)
+        if "429" in err_str or "Too Many Requests" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+            raise RuntimeError("AI rate limit hit. Please try again in a moment.")
+        if "503" in err_str or "UNAVAILABLE" in err_str or "500" in err_str:
+            raise RuntimeError("AI is temporarily unavailable (high demand). Please try again in a moment.")
+        raise
+
+    _daily_count += 1
+    text = resp.choices[0].message.content
+    text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
+    usage = resp.usage
+    cache_hit = 0
+    if hasattr(usage, 'prompt_cache_hit_tokens'):
         try:
-            resp = client.chat.completions.create(
-                model=DEEPSEEK_MODEL,
-                messages=msg,
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
-            _daily_count += 1
-            text = resp.choices[0].message.content
-            text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
-            usage = resp.usage
-            logger.info("Tokens: %d prompt + %d completion = %d total", usage.prompt_tokens, usage.completion_tokens, usage.total_tokens)
-            if return_usage:
-                return text, {"prompt": usage.prompt_tokens, "completion": usage.completion_tokens, "total": usage.total_tokens}
-            return text
-        except Exception as e:
-            err_str = str(e)
-            if "429" in err_str or "Too Many Requests" in err_str or "RESOURCE_EXHAUSTED" in err_str:
-                if attempt < 3:
-                    time.sleep(5)
-                    continue
-                raise RuntimeError("AI daily request limit reached (~1,500). Try again after midnight UTC.")
-            if "503" in err_str or "UNAVAILABLE" in err_str or "500" in err_str:
-                if attempt < 3:
-                    wait = 10 * (attempt + 1)
-                    time.sleep(wait)
-                    continue
-                raise RuntimeError("AI is temporarily unavailable (high demand). Please try again in a moment.")
-            if attempt < 3:
-                time.sleep(3)
-                continue
-            raise
-    return None
+            cache_hit = int(usage.prompt_cache_hit_tokens or 0)
+        except (TypeError, ValueError):
+            cache_hit = 0
+    elif hasattr(usage, 'prompt_tokens_details') and usage.prompt_tokens_details:
+        try:
+            cache_hit = int(getattr(usage.prompt_tokens_details, 'cached_tokens', 0) or 0)
+        except (TypeError, ValueError):
+            cache_hit = 0
+    logger.info("Tokens: %d prompt (+%d cache hit) + %d completion = %d total",
+                usage.prompt_tokens, cache_hit, usage.completion_tokens, usage.total_tokens)
+    try:
+        import database as _db
+        _db.record_token_usage(0, usage.prompt_tokens, usage.completion_tokens, cache_hit, DEEPSEEK_MODEL)
+    except Exception:
+        pass
+    if return_usage:
+        return text, {"prompt": usage.prompt_tokens, "completion": usage.completion_tokens,
+                      "cache_hit": cache_hit, "total": usage.total_tokens}
+    return text
 
 
 CHEF_PERSONA = (
@@ -202,7 +187,14 @@ IMPORTANT: Only put emojis in section headings. Never add emojis to ingredient l
 
 # --- Web Search ---
 
+from cachetools import TTLCache
+_search_cache = TTLCache(maxsize=200, ttl=600)
+
+
 def search_web(query, max_results=5, sites=None):
+    cache_key = (query, max_results, tuple(sites) if sites else None)
+    if cache_key in _search_cache:
+        return _search_cache[cache_key]
     try:
         search_q = "recipe " + query
         if sites:
@@ -213,7 +205,9 @@ def search_web(query, max_results=5, sites=None):
             snippets = []
             for r in results:
                 snippets.append(f"From: {r.get('href', '')}\nTitle: {r.get('title', '')}\n{r.get('body', '')}")
-            return "\n\n".join(snippets) if snippets else None
+            result = "\n\n".join(snippets) if snippets else None
+            _search_cache[cache_key] = result
+            return result
     except Exception:
         logger.exception("search_web failed")
         return None
@@ -305,6 +299,14 @@ def elaborate_recipe(search_query, pantry_items=None, preferences=""):
     except Exception as e:
         logger.exception("elaborate_recipe failed")
         return f"AI error: {e}"
+
+
+def generate_recipe_by_name(recipe_name, preferences=""):
+    try:
+        return elaborate_recipe(recipe_name, pantry_items=None, preferences=preferences)
+    except Exception:
+        logger.exception("generate_recipe_by_name failed")
+        return None
 
 
 def suggest_recipe(pantry_items, preferences=""):
@@ -946,7 +948,7 @@ def import_recipe_from_url(url):
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.5",
         }
-        with httpx.Client(verify=False, timeout=15, follow_redirects=True) as client:
+        with httpx.Client(timeout=15, follow_redirects=True) as client:
             resp = client.get(url, headers=headers)
             resp.raise_for_status()
             html = resp.text
@@ -1032,63 +1034,263 @@ def parse_cook_recipe(recipe_text):
 # --- Random Ingredient ---
 
 def suggest_random_ingredient(country="", exclude=None):
-    reality_check = (
+    return suggest_random_item(country, exclude, item_type="ingredient")
+
+
+def suggest_random_item(country="", exclude=None, item_type="any"):
+    if item_type == "any":
+        import random as _random
+        item_type = _random.choice(["ingredient", "equipment"])
+
+    reality_check_ingredient = (
         "CRITICAL: Only suggest ingredients that are 100% real and verifiable. "
         "Never invent or hallucinate ingredients. If you are unsure whether something exists, do not suggest it. "
         "Stick to well-known real ingredients like gochujang, sumac, yuzu kosho, harissa, black garlic, "
         "kecap manis, shrimp paste, miso, preserved lemon, za'atar, fish sauce, furikake, etc. "
     )
+    reality_check_equipment = (
+        "CRITICAL: Only suggest kitchen tools/equipment that are 100% real and verifiable. "
+        "Never invent or hallucinate tools. If you are unsure whether something exists, do not suggest it. "
+        "Think of real tools like molcajete, suribachi, mezzaluna, mandoline, spiralizer, donabe, tagine, "
+        " tajine, comal, paella pan, wok spatula, spider skimmer, potato ricer, food mill, microplane, "
+        "gnocchi board, avocado peeler, cherry pitter, garlic press, mortar and pestle, tamagoyaki pan, "
+        "oyakatta, takoyaki pan, taiyaki mold, bench scraper, dough whisk, lame, banetton, couche, "
+        "chinois, tamis, drum sieve, cheese grater, box grater, mandoline, benriner, katsuobushi kezuriki, "
+        "suribachi, usukuchi, otoshibuta, otoshibuta, donabe, kama, hangiri, sushi oke, makisu, "
+        "carbon steel wok, clay pot, sand pot, tandoor, cocotte, dutch oven, tagine, etc. "
+    )
+
     exclude_block = ""
     if exclude:
-        exclude_block = "The following ingredients have already been shown. You MUST NOT suggest any of them:\n" + \
+        exclude_block = "The following items have already been shown. You MUST NOT suggest any of them:\n" + \
             "\n".join(f"- {x}" for x in exclude) + \
             "\n\nPick something completely different.\n\n"
         exclude_block += (
-            "If you cannot think of ANY new ingredient that isn't in the exclude list, "
+            "If you cannot think of ANY new item that isn't in the exclude list, "
             "respond ONLY with exactly: NO_INGREDIENTS_LEFT\n\n"
         )
-    if country:
-        prompt = (
-            f"Suggest a single random, unusual ingredient or food item from {country} cuisine. "
-            f"{reality_check}"
-            f"{exclude_block}"
-            "It should be authentic, interesting, and something a home cook might not have tried before. "
-            "Lean toward unique spices, fermented items, pastes, condiments, and seasonings — "
-            "the more aromatic and flavourful, the better. "
-            "Return ONLY the ingredient info in exactly this format — no extra commentary:\n\n"
-            "**🛒 Ingredient:** name\n\n"
-            "**📖 What It Is:** brief description\n\n"
-            "**🍳 How to Use It:** cooking ideas and dishes it elevates\n\n"
-            "**🔬 The Science Behind It:** interesting food science fact\n\n"
-            "Vary the category each time — spices, pastes, fermented items, sauces, condiments, preserved things."
+
+    if item_type == "equipment":
+        if country:
+            prompt = (
+                f"Suggest a single random, unusual kitchen tool or food preparation equipment from {country} cuisine. "
+                f"{reality_check_equipment}"
+                f"{exclude_block}"
+                "It should be authentic, interesting, and something a home cook might not own yet. "
+                "Lean toward traditional, specialty, or craft tools — the more unique and specific, the better. "
+                "Avoid basic generic items like 'knife' or 'cutting board'. "
+                "Return ONLY the equipment info in exactly this format — no extra commentary:\n\n"
+                "**🧰 Equipment:** name\n\n"
+                "**📖 What It Is:** brief description of the tool and its origin\n\n"
+                "**🍳 How to Use It:** what dishes or techniques it's best for, and why it's better than the generic alternative\n\n"
+                "**💡 Pro Tip:** a practical tip, interesting fact, or what to look for when buying one\n"
+            )
+        else:
+            prompt = (
+                "Suggest a single random, unusual, quirky kitchen tool or food preparation equipment. "
+                f"{reality_check_equipment}"
+                f"{exclude_block}"
+                "Think outside the box — traditional tools, specialty gadgets, craft utensils, "
+                "and equipment from various world cuisines. Avoid basic generic items. "
+                "Be creative: consider ancient tools, modern gadgets, niche specialty tools, "
+                "and things most home cooks have never heard of. "
+                "Return ONLY the equipment info in exactly this format — no extra commentary:\n\n"
+                "**🧰 Equipment:** name\n\n"
+                "**📖 What It Is:** brief description of the tool and its origin\n\n"
+                "**🍳 How to Use It:** what dishes or techniques it's best for, and why it's better than the generic alternative\n\n"
+                "**💡 Pro Tip:** a practical tip, interesting fact, or what to look for when buying one\n"
+            )
+        system = (
+            CHEF_PERSONA + "\n\n---\n\nSuggest a single random, unusual kitchen tool or equipment. "
+            "Be surprising and educational. Never make up tools."
+            if not country else
+            CHEF_PERSONA + f"\n\n---\n\nSuggest a single random, unusual kitchen tool or equipment from {country} cuisine. "
+            "Be authentic, surprising, and educational. "
+            "Never make up tools."
         )
     else:
-        prompt = (
-            "Suggest a single random, unusual, quirky ingredient available in Singapore. "
-            f"{reality_check}"
-            f"{exclude_block}"
-            "Think outside the box — unique spices, pastes, fermented items, sauces, condiments, "
-            "preserved ingredients, and aromatic seasonings. Avoid basic fruits and vegetables. "
-            "Return ONLY the ingredient info in exactly this format — no extra commentary:\n\n"
-            "**🛒 Ingredient:** name\n\n"
-            "**📖 What It Is:** brief description\n\n"
-            "**🍳 How to Use It:** cooking ideas and dishes it elevates\n\n"
-            "**🔬 The Science Behind It:** interesting food science fact\n\n"
-            "Vary the category each time — spices, pastes, fermented items, sauces, condiments, preserved things."
+        if country:
+            prompt = (
+                f"Suggest a single random, unusual ingredient or food item from {country} cuisine. "
+                f"{reality_check_ingredient}"
+                f"{exclude_block}"
+                "It should be authentic, interesting, and something a home cook might not have tried before. "
+                "Lean toward unique spices, fermented items, pastes, condiments, and seasonings — "
+                "the more aromatic and flavourful, the better. "
+                "Return ONLY the ingredient info in exactly this format — no extra commentary:\n\n"
+                "**🛒 Ingredient:** name\n\n"
+                "**📖 What It Is:** brief description\n\n"
+                "**🍳 How to Use It:** cooking ideas and dishes it elevates\n\n"
+                "**🔬 The Science Behind It:** interesting food science fact\n\n"
+                "Vary the category each time — spices, pastes, fermented items, sauces, condiments, preserved things."
+            )
+        else:
+            prompt = (
+                "Suggest a single random, unusual, quirky ingredient available in Singapore. "
+                f"{reality_check_ingredient}"
+                f"{exclude_block}"
+                "Think outside the box — unique spices, pastes, fermented items, sauces, condiments, "
+                "preserved ingredients, and aromatic seasonings. Avoid basic fruits and vegetables. "
+                "Return ONLY the ingredient info in exactly this format — no extra commentary:\n\n"
+                "**🛒 Ingredient:** name\n\n"
+                "**📖 What It Is:** brief description\n\n"
+                "**🍳 How to Use It:** cooking ideas and dishes it elevates\n\n"
+                "**🔬 The Science Behind It:** interesting food science fact\n\n"
+                "Vary the category each time — spices, pastes, fermented items, sauces, condiments, preserved things."
+            )
+        system = (
+            CHEF_PERSONA + "\n\n---\n\nSuggest a single random, unusual ingredient. Be surprising and educational. "
+            "Never make up ingredients."
+            if not country else
+            CHEF_PERSONA + f"\n\n---\n\nSuggest a single random, unusual ingredient from {country} cuisine. "
+            "Be authentic, surprising, and educational. "
+            "Never make up ingredients."
         )
-    system = (
-        CHEF_PERSONA + "\n\n---\n\nSuggest a single random, unusual ingredient. Be surprising and educational. "
-        "Never make up ingredients."
-        if not country else
-        CHEF_PERSONA + f"\n\n---\n\nSuggest a single random, unusual ingredient from {country} cuisine. "
-        "Be authentic, surprising, and educational. "
-        "Never make up ingredients."
-    )
     try:
         return _ai_call(
             prompt, system,
             temperature=0.9, max_tokens=4000,
         ) or "AI error"
     except Exception as e:
-        logger.exception("suggest_random_ingredient failed")
+        logger.exception("suggest_random_item failed")
         return "AI error"
+
+
+# --- Bank Statement Parser ---
+
+
+def parse_statement(statement_text, rulebook_text):
+    system_msg = (
+        "You are a bank statement parser. Given a statement and a rulebook, extract each transaction.\n"
+        "Return ONLY JSON: {\"transactions\": [{\"date\": \"...\", \"merchant\": \"...\", \"amount\": 123.45, \"category\": \"...\", \"subcategory\": \"...\", \"account\": \"...\", \"tx_type\": \"Expense\"|\"Income\", \"confidence\": \"high\"|\"medium\"|\"low\", \"notes\": \"\"}], \"unclear_items\": [\"item1\", \"item2\"], \"due_date\": \"DD/MM/YY or empty\"}.\n"
+        "Use the rulebook to determine categories for known merchants.\n"
+        "category is the main category only (e.g. \"Food\", \"Transportation\", \"Shopping\", \"Salary\", \"Bonus\", \"Other / Reimbursement\"). For income, use the income category name as-is (e.g. \"Other / Reimbursement\" is a single category, NOT split).\n"
+        "subcategory is the subcategory or empty string. Income categories (Allowance, Salary, Bonus, Investment, Other / Reimbursement) ALWAYS have empty subcategory. Expense categories like Holiday, Gift, Other, Insurance, Gaming, Loan, Income Tax also have empty subcategory.\n"
+        "tx_type is \"Expense\" for purchases/payments, \"Income\" for salary, bonuses, refunds, reimbursements, dividends, cash rebates, etc.\n"
+        "account MUST be one of the Account Names listed in the rulebook (e.g. POSB, UOB PPV, Citi Rewards (Amaze), UOB Lady, DBS Altitude, SC SimplyCash, YouTrip, OCBC 365, MariBank). Determine the account from the statement context (the statement title/header, the card name, or rulebook hints like 'AMAZE* prefix -> Citi Rewards (Amaze)'). If you cannot determine the account, use the most likely one based on the statement source.\n"
+        "If a merchant matches no rule, mark confidence as \"low\".\n"
+        "If a due date is found (for credit card statements), include it in due_date.\n"
+        "Do NOT include transactions with confidence \"low\" in the transactions array — put them as strings in unclear_items instead.\n"
+        "Dates must be DD/MM/YY format. Amounts are positive numbers in SGD (use absolute value).\n"
+        "Strip out transactions the rulebook says to remove (salary if it says remove, insurance if it says remove, transfers, ATM withdrawals, card fees, etc.) — do not include them at all. BUT include income transactions the rulebook says to KEEP (e.g. ACCOUNTANT-GENERAL <$100 -> Other / Reimbursement / Income; PayNow from specific people -> Bonus / Income; CDP Dividends -> Investment / Income; cash rebate -> Other / Reimbursement / Income).\n"
+        "Do not include any text outside the JSON object."
+    )
+    prompt = (
+        f"RULEBOOK:\n{rulebook_text}\n\n"
+        f"---\n\n"
+        f"STATEMENT:\n{statement_text}\n\n"
+        f"---\n\n"
+        "Extract all transactions per the rules above. Every transaction MUST include category, subcategory (empty for income), account, and tx_type fields. Return ONLY the JSON object."
+    )
+    try:
+        text = _ai_call(prompt, system_msg, temperature=0.1, max_tokens=4000)
+        if not text:
+            return {"transactions": [], "unclear_items": [], "due_date": ""}
+        text = text.strip()
+        text = text.replace("```json", "").replace("```", "").strip()
+        start, end = text.find("{"), text.rfind("}")
+        if start >= 0 and end > start:
+            text = text[start:end + 1]
+        result = json.loads(text)
+        if not isinstance(result, dict):
+            return {"transactions": [], "unclear_items": [], "due_date": ""}
+        if not isinstance(result.get("transactions"), list):
+            result["transactions"] = []
+        if not isinstance(result.get("unclear_items"), list):
+            result["unclear_items"] = []
+        if not result.get("due_date"):
+            result["due_date"] = ""
+        return result
+    except Exception:
+        logger.exception("parse_statement failed")
+        return {"transactions": [], "unclear_items": [], "due_date": "", "error": "Failed to parse statement"}
+
+
+# --- Bill Input Parser ---
+
+
+def parse_bill_input(user_text):
+    system_msg = (
+        "Parse a bill input. Users type things like \"add bill OCBC 2097 400 6 May\" or \"OCBC $400 due 6/5\".\n"
+        "Return ONLY JSON: {\"card_name\": \"...\", \"card_last4\": \"...\", \"amount\": 123.45, \"due_date\": \"DD/MM/YY\"}\n"
+        "If you cannot parse it, return {\"error\": \"Could not parse. Try: add bill OCBC 2097 400 6 May\"}\n"
+        "card_name should be a short bank/card name (OCBC, UOB, Citi, etc.). card_last4 is the last 4 digits if provided, else empty string.\n"
+        "amount is a positive number. due_date is DD/MM/YY format. Assume the current year if none given.\n"
+        "Do not include any text outside the JSON object."
+    )
+    prompt = f'User input: "{user_text}"\n\nReturn ONLY the JSON object.'
+    try:
+        text = _ai_call(prompt, system_msg, temperature=0.1, max_tokens=200)
+        if not text:
+            return {"error": "Could not parse. Try: add bill OCBC 2097 400 6 May"}
+        text = text.strip()
+        text = text.replace("```json", "").replace("```", "").strip()
+        start, end = text.find("{"), text.rfind("}")
+        if start >= 0 and end > start:
+            text = text[start:end + 1]
+        result = json.loads(text)
+        if not isinstance(result, dict):
+            return {"error": "Could not parse. Try: add bill OCBC 2097 400 6 May"}
+        if "error" in result:
+            return result
+        for k in ("card_name", "card_last4", "amount", "due_date"):
+            if k not in result:
+                return {"error": "Could not parse. Try: add bill OCBC 2097 400 6 May"}
+        return result
+    except Exception:
+        logger.exception("parse_bill_input failed")
+        return {"error": "Could not parse. Try: add bill OCBC 2097 400 6 May"}
+
+
+# --- Merchant Identification via Web Search ---
+
+
+def identify_merchant(merchant_name, rulebook_text=""):
+    if not merchant_name or not merchant_name.strip():
+        return None
+    merchant_name = merchant_name.strip()
+    search_q = f'"{merchant_name}" Singapore merchant transaction'
+    snippets = None
+    try:
+        with DDGS(timeout=5) as ddgs:
+            results = ddgs.text(search_q, max_results=5)
+            snippets = []
+            for r in results:
+                snippets.append(f"Title: {r.get('title', '')}\n{r.get('body', '')}")
+            snippets = "\n\n".join(snippets) if snippets else None
+    except Exception:
+        logger.exception("identify_merchant web search failed")
+        snippets = None
+
+    system_msg = (
+        "You identify unknown merchants from bank/credit card statements.\n"
+        "Given a merchant name and web search results, determine what the merchant is and categorize it.\n"
+        "Return ONLY JSON: {\"merchant\": \"cleaned proper-case name\", \"category\": \"main category\", \"subcategory\": \"subcategory or empty\", \"account\": \"one of the rulebook Account Names or empty\", \"tx_type\": \"Expense\"|\"Income\", \"confidence\": \"high\"|\"medium\"|\"low\", \"description\": \"one-line what it is\"}\n"
+        "category is the main category only (e.g. \"Food\", \"Shopping\", \"Other / Reimbursement\"). subcategory is the subcategory or empty (income categories always have empty subcategory).\n"
+        "tx_type is \"Expense\" for purchases, \"Income\" for refunds/rebates/reimbursements.\n"
+        "account must be one of the rulebook's Account Names (POSB, UOB PPV, Citi Rewards (Amaze), UOB Lady, DBS Altitude, SC SimplyCash, YouTrip, OCBC 365, MariBank) if it can be inferred from the merchant or context; otherwise empty string.\n"
+        "If the search results don't clearly identify the merchant, return {\"confidence\": \"low\", \"merchant\": \"<original>\", \"category\": \"\", \"subcategory\": \"\", \"account\": \"\", \"tx_type\": \"Expense\", \"description\": \"could not identify\"}.\n"
+        "Do not include any text outside the JSON object."
+    )
+    prompt = (
+        f"Merchant to identify: \"{merchant_name}\"\n\n"
+        f"Rulebook categories:\n{rulebook_text[:2000] if rulebook_text else '(none)'}\n\n"
+        f"Web search results:\n{snippets if snippets else '(no results)'}\n\n"
+        "Identify this merchant and return ONLY the JSON object."
+    )
+    try:
+        text = _ai_call(prompt, system_msg, temperature=0.1, max_tokens=300)
+        if not text:
+            return None
+        text = text.strip()
+        text = text.replace("```json", "").replace("```", "").strip()
+        start, end = text.find("{"), text.rfind("}")
+        if start >= 0 and end > start:
+            text = text[start:end + 1]
+        result = json.loads(text)
+        if not isinstance(result, dict):
+            return None
+        return result
+    except Exception:
+        logger.exception("identify_merchant AI call failed")
+        return None

@@ -150,6 +150,26 @@ def _init_sqlite():
         pass
 
     try:
+        _execute(conn, "ALTER TABLE parsed_transactions ADD COLUMN account TEXT DEFAULT ''")
+    except Exception:
+        pass
+
+    try:
+        _execute(conn, "ALTER TABLE parsed_transactions ADD COLUMN subcategory TEXT DEFAULT ''")
+    except Exception:
+        pass
+
+    try:
+        _execute(conn, "ALTER TABLE parsed_transactions ADD COLUMN tx_type TEXT DEFAULT 'Expense'")
+    except Exception:
+        pass
+
+    try:
+        _execute(conn, "ALTER TABLE bills ADD COLUMN notified_today INTEGER DEFAULT 0")
+    except Exception:
+        pass
+
+    try:
         _execute(conn, """
             CREATE TABLE IF NOT EXISTS household_members (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -161,11 +181,91 @@ def _init_sqlite():
         """)
     except Exception:
         pass
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS transaction_rules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            merchant_pattern TEXT NOT NULL,
+            category TEXT NOT NULL,
+            notes TEXT DEFAULT '',
+            created_at TEXT DEFAULT (date('now')),
+            updated_at TEXT DEFAULT (date('now')),
+            UNIQUE(user_id, merchant_pattern)
+        );
+        CREATE TABLE IF NOT EXISTS parse_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            raw_text_hash TEXT NOT NULL,
+            status TEXT DEFAULT 'pending',
+            created_at TEXT DEFAULT (date('now'))
+        );
+        CREATE TABLE IF NOT EXISTS parsed_transactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            merchant TEXT NOT NULL,
+            amount REAL NOT NULL,
+            date TEXT NOT NULL,
+            category TEXT DEFAULT '',
+            subcategory TEXT DEFAULT '',
+            account TEXT DEFAULT '',
+            tx_type TEXT DEFAULT 'Expense',
+            confidence TEXT DEFAULT 'high',
+            notes TEXT DEFAULT '',
+            confirmed INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT (date('now'))
+        );
+        CREATE TABLE IF NOT EXISTS bills (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            card_name TEXT NOT NULL,
+            card_last4 TEXT DEFAULT '',
+            amount REAL NOT NULL,
+            due_date TEXT NOT NULL,
+            description TEXT DEFAULT '',
+            paid INTEGER DEFAULT 0,
+            notified_3d INTEGER DEFAULT 0,
+            notified_today INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT (date('now'))
+        );
+        CREATE TABLE IF NOT EXISTS monthly_reminders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            message TEXT NOT NULL,
+            day_of_month INTEGER DEFAULT 15,
+            last_notified_month TEXT DEFAULT '',
+            enabled INTEGER DEFAULT 1,
+            created_at TEXT DEFAULT (date('now'))
+        );
+        CREATE TABLE IF NOT EXISTS cards (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            card_name TEXT NOT NULL,
+            card_last4 TEXT DEFAULT '',
+            created_at TEXT DEFAULT (date('now')),
+            UNIQUE(user_id, card_name)
+        );
+        CREATE TABLE IF NOT EXISTS token_usage (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            prompt_tokens INTEGER DEFAULT 0,
+            completion_tokens INTEGER DEFAULT 0,
+            cache_hit_tokens INTEGER DEFAULT 0,
+            model TEXT DEFAULT '',
+            created_at TEXT DEFAULT (date('now')),
+            created_ts TEXT DEFAULT (datetime('now'))
+        );
+    """)
     for idx in [
         "CREATE INDEX IF NOT EXISTS idx_recipes_user ON recipes(user_id)",
         "CREATE INDEX IF NOT EXISTS idx_cooking_log_user ON cooking_log(user_id, cooked_date)",
         "CREATE INDEX IF NOT EXISTS idx_meal_logs_user_date ON meal_logs(user_id, logged_date)",
         "CREATE INDEX IF NOT EXISTS idx_pantry_user_expiry ON pantry(user_id, expiry_date)",
+        "CREATE INDEX IF NOT EXISTS idx_parse_sessions_user ON parse_sessions(user_id)",
+        "CREATE INDEX IF NOT EXISTS idx_parsed_tx_session ON parsed_transactions(session_id)",
+        "CREATE INDEX IF NOT EXISTS idx_bills_user_due ON bills(user_id, due_date, paid)",
+        "CREATE INDEX IF NOT EXISTS idx_tx_rules_user ON transaction_rules(user_id)",
+        "CREATE INDEX IF NOT EXISTS idx_token_usage_ts ON token_usage(created_ts)",
     ]:
         try:
             _execute(conn, idx)
@@ -263,11 +363,119 @@ def _init_pg():
             UNIQUE(primary_user_id, member_user_id)
         );
     """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS transaction_rules (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            merchant_pattern TEXT NOT NULL,
+            category TEXT NOT NULL,
+            notes TEXT DEFAULT '',
+            created_at TEXT DEFAULT (CURRENT_DATE),
+            updated_at TEXT DEFAULT (CURRENT_DATE),
+            UNIQUE(user_id, merchant_pattern)
+        );
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS parse_sessions (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            raw_text_hash TEXT NOT NULL,
+            status TEXT DEFAULT 'pending',
+            created_at TEXT DEFAULT (CURRENT_DATE)
+        );
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS parsed_transactions (
+            id SERIAL PRIMARY KEY,
+            session_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            merchant TEXT NOT NULL,
+            amount REAL NOT NULL,
+            date TEXT NOT NULL,
+            category TEXT DEFAULT '',
+            subcategory TEXT DEFAULT '',
+            account TEXT DEFAULT '',
+            tx_type TEXT DEFAULT 'Expense',
+            confidence TEXT DEFAULT 'high',
+            notes TEXT DEFAULT '',
+            confirmed INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT (CURRENT_DATE)
+        );
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS bills (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            card_name TEXT NOT NULL,
+            card_last4 TEXT DEFAULT '',
+            amount REAL NOT NULL,
+            due_date TEXT NOT NULL,
+            description TEXT DEFAULT '',
+            paid INTEGER DEFAULT 0,
+            notified_3d INTEGER DEFAULT 0,
+            notified_today INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT (CURRENT_DATE)
+        );
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS monthly_reminders (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            message TEXT NOT NULL,
+            day_of_month INTEGER DEFAULT 15,
+            last_notified_month TEXT DEFAULT '',
+            enabled INTEGER DEFAULT 1,
+            created_at TEXT DEFAULT (CURRENT_DATE)
+        );
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS cards (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            card_name TEXT NOT NULL,
+            card_last4 TEXT DEFAULT '',
+            created_at TEXT DEFAULT (CURRENT_DATE),
+            UNIQUE(user_id, card_name)
+        );
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS token_usage (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            prompt_tokens INTEGER DEFAULT 0,
+            completion_tokens INTEGER DEFAULT 0,
+            cache_hit_tokens INTEGER DEFAULT 0,
+            model TEXT DEFAULT '',
+            created_at TEXT DEFAULT (CURRENT_DATE),
+            created_ts TEXT DEFAULT (CURRENT_TIMESTAMP)
+        );
+    """)
+    try:
+        cur.execute("ALTER TABLE parsed_transactions ADD COLUMN IF NOT EXISTS account TEXT DEFAULT ''")
+    except Exception:
+        pass
+    try:
+        cur.execute("ALTER TABLE parsed_transactions ADD COLUMN IF NOT EXISTS subcategory TEXT DEFAULT ''")
+    except Exception:
+        pass
+    try:
+        cur.execute("ALTER TABLE parsed_transactions ADD COLUMN IF NOT EXISTS tx_type TEXT DEFAULT 'Expense'")
+    except Exception:
+        pass
+    try:
+        cur.execute("ALTER TABLE bills ADD COLUMN IF NOT EXISTS notified_today INTEGER DEFAULT 0")
+    except Exception:
+        pass
     for idx in [
         "CREATE INDEX IF NOT EXISTS idx_recipes_user ON recipes(user_id)",
         "CREATE INDEX IF NOT EXISTS idx_cooking_log_user ON cooking_log(user_id, cooked_date)",
         "CREATE INDEX IF NOT EXISTS idx_meal_logs_user_date ON meal_logs(user_id, logged_date)",
         "CREATE INDEX IF NOT EXISTS idx_pantry_user_expiry ON pantry(user_id, expiry_date)",
+        "CREATE INDEX IF NOT EXISTS idx_parse_sessions_user ON parse_sessions(user_id)",
+        "CREATE INDEX IF NOT EXISTS idx_parsed_tx_session ON parsed_transactions(session_id)",
+        "CREATE INDEX IF NOT EXISTS idx_bills_user_due ON bills(user_id, due_date, paid)",
+        "CREATE INDEX IF NOT EXISTS idx_tx_rules_user ON transaction_rules(user_id)",
+        "CREATE INDEX IF NOT EXISTS idx_token_usage_ts ON token_usage(created_ts)",
     ]:
         try:
             cur.execute(idx)
@@ -831,3 +1039,449 @@ def get_household_members(primary_user_id):
     rows = _fetchall(cur)
     _close(conn)
     return rows
+
+
+# --- Transaction Rules (Statement Parser Rulebook) ---
+
+
+def add_transaction_rule(user_id, merchant_pattern, category, notes=""):
+    merchant_pattern = merchant_pattern.strip().lower()
+    category = (category or "").strip()
+    notes = (notes or "").strip()
+    conn = get_connection()
+    _execute(conn,
+        _q("INSERT INTO transaction_rules (user_id, merchant_pattern, category, notes, updated_at) VALUES (?, ?, ?, ?, CURRENT_DATE) ON CONFLICT(user_id, merchant_pattern) DO UPDATE SET category = excluded.category, notes = excluded.notes, updated_at = CURRENT_DATE"),
+        (user_id, merchant_pattern, category, notes),
+    )
+    _commit(conn)
+    _close(conn)
+
+
+def get_transaction_rules(user_id):
+    conn = get_connection()
+    cur = _execute(conn, _q("SELECT id, user_id, merchant_pattern, category, notes, created_at, updated_at FROM transaction_rules WHERE user_id = ? ORDER BY updated_at DESC"), (user_id,))
+    rows = _fetchall(cur)
+    _close(conn)
+    return rows
+
+
+def get_transaction_rule(user_id, merchant_pattern):
+    merchant_pattern = merchant_pattern.strip().lower()
+    conn = get_connection()
+    cur = _execute(conn, _q("SELECT id, user_id, merchant_pattern, category, notes FROM transaction_rules WHERE user_id = ? AND merchant_pattern = ?"), (user_id, merchant_pattern))
+    row = _fetchone(cur)
+    _close(conn)
+    return row
+
+
+def delete_transaction_rule(rule_id):
+    conn = get_connection()
+    _execute(conn, _q("DELETE FROM transaction_rules WHERE id = ?"), (rule_id,))
+    _commit(conn)
+    _close(conn)
+
+
+# --- Parse Sessions & Parsed Transactions ---
+
+
+def create_parse_session(user_id, raw_text):
+    import hashlib
+    raw_text_hash = hashlib.sha256(raw_text.encode("utf-8")).hexdigest()
+    conn = get_connection()
+    cur = _execute(conn,
+        _q("INSERT INTO parse_sessions (user_id, raw_text_hash) VALUES (?, ?)"),
+        (user_id, raw_text_hash),
+    )
+    _commit(conn)
+    session_id = cur.lastrowid if not USE_PG else cur.lastrowid
+    if USE_PG:
+        cur2 = _execute(conn, "SELECT lastval()")
+        r = _fetchone(cur2)
+        session_id = r["lastval"] if r else None
+    _close(conn)
+    return session_id
+
+
+def add_parsed_transaction(session_id, user_id, merchant, amount, date_str, category, confidence, notes="", account="", subcategory="", tx_type="Expense"):
+    merchant = (merchant or "").strip()
+    category = (category or "").strip()
+    subcategory = (subcategory or "").strip()
+    account = (account or "").strip()
+    tx_type = (tx_type or "Expense").strip().capitalize()
+    if tx_type not in ("Expense", "Income"):
+        tx_type = "Expense"
+    confidence = (confidence or "high").strip().lower()
+    notes = (notes or "").strip()
+    conn = get_connection()
+    cur = _execute(conn,
+        _q("INSERT INTO parsed_transactions (session_id, user_id, merchant, amount, date, category, subcategory, account, tx_type, confidence, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"),
+        (session_id, user_id, merchant, float(amount), date_str, category, subcategory, account, tx_type, confidence, notes),
+    )
+    _commit(conn)
+    tx_id = cur.lastrowid if not USE_PG else cur.lastrowid
+    if USE_PG:
+        cur2 = _execute(conn, "SELECT lastval()")
+        r = _fetchone(cur2)
+        tx_id = r["lastval"] if r else None
+    _close(conn)
+    return tx_id
+
+
+def get_parse_session(session_id):
+    conn = get_connection()
+    cur = _execute(conn, _q("SELECT id, user_id, raw_text_hash, status, created_at FROM parse_sessions WHERE id = ?"), (session_id,))
+    row = _fetchone(cur)
+    _close(conn)
+    return row
+
+
+def get_parse_session_by_hash(user_id, raw_text_hash):
+    conn = get_connection()
+    cur = _execute(conn, _q("SELECT id, user_id, raw_text_hash, status, created_at FROM parse_sessions WHERE user_id = ? AND raw_text_hash = ? ORDER BY id DESC"), (user_id, raw_text_hash))
+    rows = _fetchall(cur)
+    _close(conn)
+    return rows
+
+
+def get_parsed_transactions(session_id):
+    conn = get_connection()
+    cur = _execute(conn, _q("SELECT id, session_id, user_id, merchant, amount, date, category, subcategory, account, tx_type, confidence, notes, confirmed, created_at FROM parsed_transactions WHERE session_id = ? ORDER BY id"), (session_id,))
+    rows = _fetchall(cur)
+    _close(conn)
+    return rows
+
+
+def get_parsed_transaction(tx_id):
+    conn = get_connection()
+    cur = _execute(conn, _q("SELECT id, session_id, user_id, merchant, amount, date, category, subcategory, account, tx_type, confidence, notes, confirmed, created_at FROM parsed_transactions WHERE id = ?"), (tx_id,))
+    row = _fetchone(cur)
+    _close(conn)
+    return row
+
+
+def update_parsed_transaction(tx_id, **kwargs):
+    if not kwargs:
+        return
+    allowed = {"merchant", "amount", "date", "category", "subcategory", "account", "tx_type", "confidence", "notes", "confirmed"}
+    fields = []
+    values = []
+    for k, v in kwargs.items():
+        if k not in allowed:
+            continue
+        if k == "merchant":
+            v = (v or "").strip()
+        elif k == "category":
+            v = (v or "").strip()
+        elif k == "subcategory":
+            v = (v or "").strip()
+        elif k == "account":
+            v = (v or "").strip()
+        elif k == "tx_type":
+            v = (v or "Expense").strip().capitalize()
+            if v not in ("Expense", "Income"):
+                v = "Expense"
+        elif k == "confidence":
+            v = (v or "").strip().lower()
+        elif k == "notes":
+            v = (v or "").strip()
+        elif k == "amount":
+            v = float(v)
+        elif k == "confirmed":
+            v = int(v)
+        fields.append(f"{k} = ?")
+        values.append(v)
+    if not fields:
+        return
+    values.append(tx_id)
+    conn = get_connection()
+    _execute(conn, _q(f"UPDATE parsed_transactions SET {', '.join(fields)} WHERE id = ?"), values)
+    _commit(conn)
+    _close(conn)
+
+
+def update_parse_session_status(session_id, status):
+    status = status.strip().lower()
+    conn = get_connection()
+    _execute(conn, _q("UPDATE parse_sessions SET status = ? WHERE id = ?"), (status, session_id))
+    _commit(conn)
+    _close(conn)
+
+
+def delete_parse_session(session_id):
+    conn = get_connection()
+    _execute(conn, _q("DELETE FROM parsed_transactions WHERE session_id = ?"), (session_id,))
+    _execute(conn, _q("DELETE FROM parse_sessions WHERE id = ?"), (session_id,))
+    _commit(conn)
+    _close(conn)
+
+
+# --- Bills ---
+
+
+def add_bill(user_id, card_name, amount, due_date, card_last4="", description=""):
+    card_name = (card_name or "").strip().lower()
+    card_last4 = (card_last4 or "").strip()
+    description = (description or "").strip()
+    conn = get_connection()
+    cur = _execute(conn,
+        _q("INSERT INTO bills (user_id, card_name, card_last4, amount, due_date, description) VALUES (?, ?, ?, ?, ?, ?)"),
+        (user_id, card_name, card_last4, float(amount), due_date, description),
+    )
+    _commit(conn)
+    bill_id = cur.lastrowid if not USE_PG else cur.lastrowid
+    if USE_PG:
+        cur2 = _execute(conn, "SELECT lastval()")
+        r = _fetchone(cur2)
+        bill_id = r["lastval"] if r else None
+    _close(conn)
+    return bill_id
+
+
+def get_bills(user_id):
+    conn = get_connection()
+    cur = _execute(conn, _q("SELECT id, user_id, card_name, card_last4, amount, due_date, description, paid, notified_3d, notified_today, created_at FROM bills WHERE user_id = ? AND paid = 0 ORDER BY due_date"), (user_id,))
+    rows = _fetchall(cur)
+    _close(conn)
+    return rows
+
+
+def get_bill(bill_id):
+    conn = get_connection()
+    cur = _execute(conn, _q("SELECT id, user_id, card_name, card_last4, amount, due_date, description, paid, notified_3d, notified_today, created_at FROM bills WHERE id = ?"), (bill_id,))
+    row = _fetchone(cur)
+    _close(conn)
+    return row
+
+
+def pay_bill(bill_id):
+    conn = get_connection()
+    _execute(conn, _q("UPDATE bills SET paid = 1 WHERE id = ?"), (bill_id,))
+    _commit(conn)
+    _close(conn)
+
+
+def remove_bill(bill_id):
+    conn = get_connection()
+    _execute(conn, _q("DELETE FROM bills WHERE id = ?"), (bill_id,))
+    _commit(conn)
+    _close(conn)
+
+
+def mark_bill_notified(bill_id):
+    conn = get_connection()
+    _execute(conn, _q("UPDATE bills SET notified_3d = 1 WHERE id = ?"), (bill_id,))
+    _commit(conn)
+    _close(conn)
+
+
+def mark_bill_notified_today(bill_id):
+    conn = get_connection()
+    _execute(conn, _q("UPDATE bills SET notified_today = 1 WHERE id = ?"), (bill_id,))
+    _commit(conn)
+    _close(conn)
+
+
+def get_bills_due_today(user_id):
+    today_str = date.today().isoformat()
+    conn = get_connection()
+    cur = _execute(conn,
+        _q("SELECT id, user_id, card_name, card_last4, amount, due_date, description, paid, notified_3d, notified_today, created_at FROM bills WHERE user_id = ? AND paid = 0 AND notified_today = 0 AND due_date = ? ORDER BY id"),
+        (user_id, today_str),
+    )
+    rows = _fetchall(cur)
+    _close(conn)
+    return rows
+
+
+def get_bills_due_soon(user_id, days=3):
+    today = date.today()
+    cutoff = (today + timedelta(days=days)).isoformat()
+    today_str = today.isoformat()
+    conn = get_connection()
+    cur = _execute(conn,
+        _q("SELECT id, user_id, card_name, card_last4, amount, due_date, description, paid, notified_3d, notified_today, created_at FROM bills WHERE user_id = ? AND paid = 0 AND notified_3d = 0 AND due_date > ? AND due_date <= ? ORDER BY due_date"),
+        (user_id, today_str, cutoff),
+    )
+    rows = _fetchall(cur)
+    _close(conn)
+    return rows
+
+
+# --- Monthly Reminders ---
+
+
+def get_monthly_reminders(user_id):
+    conn = get_connection()
+    cur = _execute(conn, _q("SELECT id, user_id, message, day_of_month, last_notified_month, enabled, created_at FROM monthly_reminders WHERE user_id = ? AND enabled = 1 ORDER BY id"), (user_id,))
+    rows = _fetchall(cur)
+    _close(conn)
+    return rows
+
+
+def add_monthly_reminder(user_id, message, day_of_month=15):
+    conn = get_connection()
+    cur = _execute(conn,
+        _q("INSERT INTO monthly_reminders (user_id, message, day_of_month) VALUES (?, ?, ?)"),
+        (user_id, message, int(day_of_month)),
+    )
+    _commit(conn)
+    rid = cur.lastrowid if not USE_PG else cur.lastrowid
+    if USE_PG:
+        cur2 = _execute(conn, "SELECT lastval()")
+        r = _fetchone(cur2)
+        rid = r["lastval"] if r else None
+    _close(conn)
+    return rid
+
+
+def mark_monthly_notified(reminder_id, month_str):
+    conn = get_connection()
+    _execute(conn, _q("UPDATE monthly_reminders SET last_notified_month = ? WHERE id = ?"), (month_str, reminder_id))
+    _commit(conn)
+    _close(conn)
+
+
+def get_monthly_reminders_due(user_id, day_of_month):
+    month_str = date.today().strftime("%Y-%m")
+    conn = get_connection()
+    cur = _execute(conn,
+        _q("SELECT id, user_id, message, day_of_month, last_notified_month, enabled, created_at FROM monthly_reminders WHERE user_id = ? AND enabled = 1 AND day_of_month = ? AND (last_notified_month IS NULL OR last_notified_month != ?)"),
+        (user_id, int(day_of_month), month_str),
+    )
+    rows = _fetchall(cur)
+    _close(conn)
+    return rows
+
+
+# --- Cards (card registry for bills) ---
+
+
+def add_card(user_id, card_name, card_last4=""):
+    card_name = (card_name or "").strip().lower()
+    card_last4 = (card_last4 or "").strip()
+    conn = get_connection()
+    _execute(conn,
+        _q("INSERT INTO cards (user_id, card_name, card_last4) VALUES (?, ?, ?) ON CONFLICT(user_id, card_name) DO UPDATE SET card_last4 = excluded.card_last4"),
+        (user_id, card_name, card_last4),
+    )
+    _commit(conn)
+    _close(conn)
+
+
+def get_cards(user_id):
+    conn = get_connection()
+    cur = _execute(conn, _q("SELECT id, user_id, card_name, card_last4, created_at FROM cards WHERE user_id = ? ORDER BY card_name"), (user_id,))
+    rows = _fetchall(cur)
+    _close(conn)
+    return rows
+
+
+def get_card(user_id, card_name):
+    card_name = (card_name or "").strip().lower()
+    conn = get_connection()
+    cur = _execute(conn, _q("SELECT id, user_id, card_name, card_last4, created_at FROM cards WHERE user_id = ? AND card_name = ?"), (user_id, card_name))
+    row = _fetchone(cur)
+    _close(conn)
+    return row
+
+
+def get_card_last4(user_id, card_name):
+    card = get_card(user_id, card_name)
+    if card:
+        return card["card_last4"] or ""
+    return ""
+
+
+def remove_card(user_id, card_name):
+    card_name = (card_name or "").strip().lower()
+    conn = get_connection()
+    _execute(conn, _q("DELETE FROM cards WHERE user_id = ? AND card_name = ?"), (user_id, card_name))
+    _commit(conn)
+    _close(conn)
+
+
+# --- Token Usage Tracking ---
+
+
+def record_token_usage(user_id, prompt_tokens, completion_tokens, cache_hit_tokens, model=""):
+    conn = get_connection()
+    _execute(conn,
+        _q("INSERT INTO token_usage (user_id, prompt_tokens, completion_tokens, cache_hit_tokens, model) VALUES (?, ?, ?, ?, ?)"),
+        (int(user_id), int(prompt_tokens), int(completion_tokens), int(cache_hit_tokens), model or ""),
+    )
+    _commit(conn)
+    _close(conn)
+
+
+def get_token_usage_today(user_id=None):
+    today = date.today().isoformat()
+    conn = get_connection()
+    if user_id:
+        cur = _execute(conn,
+            _q("SELECT COALESCE(SUM(prompt_tokens),0) as p, COALESCE(SUM(completion_tokens),0) as c, COALESCE(SUM(cache_hit_tokens),0) as h, COUNT(*) as n FROM token_usage WHERE created_at = ? AND user_id = ?"),
+            (today, user_id))
+    else:
+        cur = _execute(conn,
+            _q("SELECT COALESCE(SUM(prompt_tokens),0) as p, COALESCE(SUM(completion_tokens),0) as c, COALESCE(SUM(cache_hit_tokens),0) as h, COUNT(*) as n FROM token_usage WHERE created_at = ?"),
+            (today,))
+    row = _fetchone(cur)
+    _close(conn)
+    return row or {"p": 0, "c": 0, "h": 0, "n": 0}
+
+
+def get_token_usage_month(user_id=None):
+    today = date.today()
+    month_start = f"{today.year:04d}-{today.month:02d}-01"
+    conn = get_connection()
+    if user_id:
+        cur = _execute(conn,
+            _q("SELECT COALESCE(SUM(prompt_tokens),0) as p, COALESCE(SUM(completion_tokens),0) as c, COALESCE(SUM(cache_hit_tokens),0) as h, COUNT(*) as n FROM token_usage WHERE created_at >= ? AND user_id = ?"),
+            (month_start, user_id))
+    else:
+        cur = _execute(conn,
+            _q("SELECT COALESCE(SUM(prompt_tokens),0) as p, COALESCE(SUM(completion_tokens),0) as c, COALESCE(SUM(cache_hit_tokens),0) as h, COUNT(*) as n FROM token_usage WHERE created_at >= ?"),
+            (month_start,))
+    row = _fetchone(cur)
+    _close(conn)
+    return row or {"p": 0, "c": 0, "h": 0, "n": 0}
+
+
+def get_token_usage_lifetime(user_id=None):
+    conn = get_connection()
+    if user_id:
+        cur = _execute(conn,
+            _q("SELECT COALESCE(SUM(prompt_tokens),0) as p, COALESCE(SUM(completion_tokens),0) as c, COALESCE(SUM(cache_hit_tokens),0) as h, COUNT(*) as n FROM token_usage WHERE user_id = ?"),
+            (user_id,))
+    else:
+        cur = _execute(conn,
+            _q("SELECT COALESCE(SUM(prompt_tokens),0) as p, COALESCE(SUM(completion_tokens),0) as c, COALESCE(SUM(cache_hit_tokens),0) as h, COUNT(*) as n FROM token_usage"))
+    row = _fetchone(cur)
+    _close(conn)
+    return row or {"p": 0, "c": 0, "h": 0, "n": 0}
+
+
+# --- Batch Pantry Operations ---
+
+
+def add_pantry_items_with_expiry(user_id, items):
+    """items: list of (name, expiry_iso_or_empty) tuples. Single connection."""
+    conn = get_connection()
+    for name, expiry in items:
+        name = name.strip().lower()
+        category = categorize_item(name)
+        _execute(conn,
+            _q("INSERT INTO pantry (user_id, name, quantity, unit, expiry_date, category) VALUES (?, ?, '1', '', ?, ?) ON CONFLICT(user_id, name) DO UPDATE SET quantity = excluded.quantity, unit = excluded.unit, expiry_date = COALESCE(excluded.expiry_date, pantry.expiry_date), category = COALESCE(excluded.category, pantry.category)"),
+            (user_id, name, expiry if expiry else None, category),
+        )
+    _commit(conn)
+    _close(conn)
+
+
+def remove_pantry_items(user_id, names):
+    """Batch remove multiple pantry items. Single connection."""
+    conn = get_connection()
+    for name in names:
+        _execute(conn, _q("DELETE FROM pantry WHERE user_id = ? AND name = ?"),
+                     (user_id, name.strip().lower()))
+    _commit(conn)
+    _close(conn)
