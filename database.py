@@ -498,6 +498,10 @@ def _init_pg():
         cur.execute("ALTER TABLE bills ADD COLUMN IF NOT EXISTS notified_today INTEGER DEFAULT 0")
     except Exception:
         pass
+    try:
+        cur.execute("ALTER TABLE vouchers ALTER COLUMN expiry_date DROP NOT NULL")
+    except Exception:
+        pass
     for idx in [
         "CREATE INDEX IF NOT EXISTS idx_recipes_user ON recipes(user_id)",
         "CREATE INDEX IF NOT EXISTS idx_cooking_log_user ON cooking_log(user_id, cooked_date)",
