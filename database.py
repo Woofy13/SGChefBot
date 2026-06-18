@@ -143,7 +143,19 @@ def _init_sqlite():
             checked INTEGER DEFAULT 0,
             UNIQUE(user_id, name)
         );
+        CREATE TABLE IF NOT EXISTS vouchers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            details TEXT DEFAULT '',
+            expiry_date TEXT NOT NULL,
+            created_at TEXT DEFAULT (date('now'))
+        );
     """)
+    try:
+        _execute(conn, "ALTER TABLE recipes ADD COLUMN full_text TEXT DEFAULT ''")
+    except Exception:
+        pass
     try:
         _execute(conn, "ALTER TABLE recipes ADD COLUMN full_text TEXT DEFAULT ''")
     except Exception:
@@ -266,6 +278,7 @@ def _init_sqlite():
         "CREATE INDEX IF NOT EXISTS idx_bills_user_due ON bills(user_id, due_date, paid)",
         "CREATE INDEX IF NOT EXISTS idx_tx_rules_user ON transaction_rules(user_id)",
         "CREATE INDEX IF NOT EXISTS idx_token_usage_ts ON token_usage(created_ts)",
+        "CREATE INDEX IF NOT EXISTS idx_vouchers_user_expiry ON vouchers(user_id, expiry_date)",
     ]:
         try:
             _execute(conn, idx)
@@ -450,6 +463,16 @@ def _init_pg():
             created_ts TEXT DEFAULT (CURRENT_TIMESTAMP)
         );
     """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS vouchers (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            details TEXT DEFAULT '',
+            expiry_date TEXT NOT NULL,
+            created_at TEXT DEFAULT (CURRENT_DATE)
+        );
+    """)
     try:
         cur.execute("ALTER TABLE parsed_transactions ADD COLUMN IF NOT EXISTS account TEXT DEFAULT ''")
     except Exception:
@@ -476,6 +499,7 @@ def _init_pg():
         "CREATE INDEX IF NOT EXISTS idx_bills_user_due ON bills(user_id, due_date, paid)",
         "CREATE INDEX IF NOT EXISTS idx_tx_rules_user ON transaction_rules(user_id)",
         "CREATE INDEX IF NOT EXISTS idx_token_usage_ts ON token_usage(created_ts)",
+        "CREATE INDEX IF NOT EXISTS idx_vouchers_user_expiry ON vouchers(user_id, expiry_date)",
     ]:
         try:
             cur.execute(idx)
@@ -1485,3 +1509,65 @@ def remove_pantry_items(user_id, names):
                      (user_id, name.strip().lower()))
     _commit(conn)
     _close(conn)
+
+
+# --- Vouchers ---
+
+
+def add_voucher(user_id, name, details, expiry_date):
+    name = name.strip().title()
+    conn = get_connection()
+    _execute(conn,
+        _q("INSERT INTO vouchers (user_id, name, details, expiry_date) VALUES (?, ?, ?, ?)"),
+        (user_id, name, (details or "").strip(), expiry_date),
+    )
+    _commit(conn)
+    _close(conn)
+
+
+def get_active_vouchers(user_id):
+    today_str = date.today().isoformat()
+    conn = get_connection()
+    cur = _execute(conn,
+        _q("SELECT id, user_id, name, details, expiry_date, created_at FROM vouchers WHERE user_id = ? AND expiry_date >= ? ORDER BY expiry_date"),
+        (user_id, today_str),
+    )
+    rows = _fetchall(cur)
+    _close(conn)
+    return rows
+
+
+def delete_voucher(voucher_id):
+    conn = get_connection()
+    _execute(conn, _q("DELETE FROM vouchers WHERE id = ?"), (voucher_id,))
+    _commit(conn)
+    _close(conn)
+
+
+def get_vouchers_expiring_soon(user_id, days=7):
+    cutoff = (date.today() + timedelta(days=days)).isoformat()
+    today_str = date.today().isoformat()
+    conn = get_connection()
+    cur = _execute(conn,
+        _q("SELECT id, name, details, expiry_date FROM vouchers WHERE user_id = ? AND expiry_date > ? AND expiry_date <= ? ORDER BY expiry_date"),
+        (user_id, today_str, cutoff),
+    )
+    rows = _fetchall(cur)
+    _close(conn)
+    return rows
+
+
+def get_vouchers_expiring_in_month(user_id, year, month):
+    start = f"{year:04d}-{month:02d}-01"
+    if month == 12:
+        end = f"{year + 1:04d}-01-01"
+    else:
+        end = f"{year:04d}-{month + 1:02d}-01"
+    conn = get_connection()
+    cur = _execute(conn,
+        _q("SELECT id, name, details, expiry_date FROM vouchers WHERE user_id = ? AND expiry_date >= ? AND expiry_date < ? ORDER BY expiry_date"),
+        (user_id, start, end),
+    )
+    rows = _fetchall(cur)
+    _close(conn)
+    return rows

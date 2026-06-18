@@ -3969,6 +3969,98 @@ async def remove_bill_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"\U0001f5d1 Removed bill #{bill_id}: {bill['card_name'].upper()} (${bill['amount']:.2f})")
 
 
+async def add_voucher_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    db.store_chat_id(user_id, update.effective_chat.id)
+    if user_id != OWNER_TELEGRAM_ID:
+        return
+    args = context.args
+    if not args or len(args) < 1:
+        await update.message.reply_text("Usage: `/addvoucher PARADISE, $10 off $50, 30th June`", parse_mode="Markdown")
+        return
+    raw = " ".join(args)
+    parts = [p.strip() for p in raw.split(",") if p.strip()]
+    if len(parts) < 3:
+        await update.message.reply_text("Need at least 3 comma-separated fields: name, details, expiry date")
+        return
+    name = parts[0]
+    details = parts[1]
+    expiry_raw = ", ".join(parts[2:])
+    parsed = _parse_expiry(expiry_raw)
+    if not parsed:
+        await update.message.reply_text(f"Could not parse expiry date: {expiry_raw}")
+        return
+    db.add_voucher(user_id, name, details, parsed)
+    try:
+        due = date.fromisoformat(parsed).strftime("%-d %b %Y")
+    except Exception:
+        due = parsed
+    await update.message.reply_text(f"\u2705 Added voucher: **{name}** — {details} (exp {due})", parse_mode="Markdown")
+
+
+async def vouchers_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    db.store_chat_id(user_id, update.effective_chat.id)
+    if user_id != OWNER_TELEGRAM_ID:
+        return
+    vouchers = db.get_active_vouchers(user_id)
+    if not vouchers:
+        await update.message.reply_text("No active vouchers.")
+        return
+    today = date.today()
+    lines = ["\U0001f39f Your Vouchers", ""]
+    buttons = []
+    for v in vouchers:
+        try:
+            exp = date.fromisoformat(v["expiry_date"])
+            remaining = (exp - today).days
+            exp_str = exp.strftime("%-d %b %Y")
+            days_str = f" ({remaining}d left)" if remaining >= 0 else " (expired)"
+        except Exception:
+            exp_str = v["expiry_date"]
+            days_str = ""
+        lines.append(f"{v['id']}. {v['name']}")
+        lines.append(f"   \U0001f4cb {v['details']}")
+        lines.append(f"   \u26a0 Expires: {exp_str}{days_str}")
+        lines.append("")
+        buttons.append([InlineKeyboardButton(f"\u2705 Use {v['name']}", callback_data=f"voucher_use_{v['id']}")])
+    await update.message.reply_text("\n".join(lines).strip(), reply_markup=InlineKeyboardMarkup(buttons))
+
+
+async def voucher_use_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    if user_id != OWNER_TELEGRAM_ID:
+        return
+    vid = int(query.data.split("_")[2])
+    v = db.get_active_vouchers(user_id)
+    v = next((x for x in v if x["id"] == vid), None)
+    db.delete_voucher(vid)
+    remaining = db.get_active_vouchers(user_id)
+    if not remaining:
+        await query.edit_message_text(f"\u2705 Marked **{v['name']}** as used. No active vouchers remaining.", parse_mode="Markdown")
+        return
+    today = date.today()
+    lines = ["\U0001f39f Your Vouchers", ""]
+    buttons = []
+    for v2 in remaining:
+        try:
+            exp = date.fromisoformat(v2["expiry_date"])
+            rem = (exp - today).days
+            exp_str = exp.strftime("%-d %b %Y")
+            days_str = f" ({rem}d left)" if rem >= 0 else " (expired)"
+        except Exception:
+            exp_str = v2["expiry_date"]
+            days_str = ""
+        lines.append(f"{v2['id']}. {v2['name']}")
+        lines.append(f"   \U0001f4cb {v2['details']}")
+        lines.append(f"   \u26a0 Expires: {exp_str}{days_str}")
+        lines.append("")
+        buttons.append([InlineKeyboardButton(f"\u2705 Use {v2['name']}", callback_data=f"voucher_use_{v2['id']}")])
+    await query.edit_message_text("\n".join(lines).strip(), reply_markup=InlineKeyboardMarkup(buttons))
+
+
 async def bill_pay_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -4108,6 +4200,37 @@ async def check_bill_reminders(context: ContextTypes.DEFAULT_TYPE):
             db.mark_monthly_notified(reminder["id"], today.strftime("%Y-%m"))
         except Exception as e:
             logger.error(f"Monthly reminder send failed: {e}")
+    # Voucher reminders: monthly (new month) + weekly (7 days before expiry)
+    today_y = today.year
+    today_m = today.month
+    tmrw = today.replace(day=1)
+    if today.day == 1:
+        for v in db.get_vouchers_expiring_in_month(OWNER_TELEGRAM_ID, today_y, today_m):
+            try:
+                exp = date.fromisoformat(v["expiry_date"]).strftime("%-d %b %Y")
+            except Exception:
+                exp = v["expiry_date"]
+            try:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"\U0001f39f Voucher expiring this month: **{v['name']}** ({v['details']}) \u2014 expires {exp}",
+                    parse_mode="Markdown",
+                )
+            except Exception as e:
+                logger.error(f"Monthly voucher reminder failed: {e}")
+    for v in db.get_vouchers_expiring_soon(OWNER_TELEGRAM_ID, days=7):
+        try:
+            exp = date.fromisoformat(v["expiry_date"]).strftime("%-d %b %Y")
+        except Exception:
+            exp = v["expiry_date"]
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"\u26a0 Voucher **{v['name']}** expires {exp}! ({v['details']})",
+                parse_mode="Markdown",
+            )
+        except Exception as e:
+            logger.error(f"Weekly voucher reminder failed: {e}")
 
 
 async def cancel_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4300,6 +4423,9 @@ def create_app(token: str):
     app.add_handler(CommandHandler("merge", merge_command))
     app.add_handler(CommandHandler("mergeparse", merge_parse_now))
     app.add_handler(CommandHandler("mergecancel", merge_cancel))
+    app.add_handler(CommandHandler("addvoucher", add_voucher_cmd))
+    app.add_handler(CommandHandler("vouchers", vouchers_cmd))
+    app.add_handler(CallbackQueryHandler(voucher_use_callback, pattern="^voucher_use_"))
     app.add_handler(CommandHandler("cancel", cancel_pending))
     app.add_handler(CallbackQueryHandler(parse_callback, pattern="^parse_"))
     app.add_handler(CallbackQueryHandler(bill_callback, pattern="^bill_(confirm|cancel)$"))
