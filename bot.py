@@ -2014,7 +2014,7 @@ async def _handle_user_text(update, context, user_id, text):
 
     t_lower = text.lower().strip()
 
-    if any(w in t_lower for w in ["what do i have", "show pantry", "list pantry", "my pantry", "whats in my pantry", "what's in my pantry"]):
+    if t_lower == "pantry" or any(w in t_lower for w in ["what do i have", "show pantry", "list pantry", "my pantry", "whats in my pantry", "what's in my pantry"]):
         groups = db.get_pantry_grouped(user_id)
         if not groups:
             await update.effective_message.reply_text("Your pantry is empty. Tell me what to add!")
@@ -2022,7 +2022,7 @@ async def _handle_user_text(update, context, user_id, text):
         await _send_long_message(update, None, _format_pantry_grouped(groups), None)
         return
 
-    if any(w in t_lower for w in ["show recipes", "list recipes", "my recipes", "saved recipes"]) and "recipe" in t_lower:
+    if t_lower in ("recipes", "recipe") or (any(w in t_lower for w in ["show recipes", "list recipes", "my recipes", "saved recipes"]) and "recipe" in t_lower):
         await list_recipes(update, context)
         return
 
@@ -2035,6 +2035,10 @@ async def _handle_user_text(update, context, user_id, text):
         for item in db.get_pantry_names(eff_id):
             db.remove_pantry_item(eff_id, item)
         await update.effective_message.reply_text("Pantry cleared!")
+        return
+
+    if t_lower in ("help", "menu", "commands"):
+        await start(update, context)
         return
 
     if any(w in t_lower for w in ["shopping list", "show shopping", "my shopping", "view shopping"]):
