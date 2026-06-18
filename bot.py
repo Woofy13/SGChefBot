@@ -4012,7 +4012,7 @@ async def vouchers_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     today = date.today()
     lines = ["\U0001f39f Your Vouchers", ""]
     buttons = []
-    for v in vouchers:
+    for idx, v in enumerate(vouchers, 1):
         exp_str = v.get("expiry_date")
         if exp_str:
             try:
@@ -4025,7 +4025,7 @@ async def vouchers_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             exp_line = f"   \u26a0 Expires: {exp_str}{days_str}"
         else:
             exp_line = "   \u26a0 No expiry"
-        lines.append(f"{v['id']}. {v['name']}")
+        lines.append(f"{idx}. {v['name']}")
         lines.append(f"   \U0001f4cb {v['details']}")
         lines.append(exp_line)
         lines.append("")
@@ -4050,7 +4050,7 @@ async def voucher_use_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     today = date.today()
     lines = ["\U0001f39f Your Vouchers", ""]
     buttons = []
-    for v2 in remaining:
+    for idx2, v2 in enumerate(remaining, 1):
         es = v2.get("expiry_date")
         if es:
             try:
@@ -4063,7 +4063,7 @@ async def voucher_use_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             exp_line = f"   \u26a0 Expires: {es}{days_str}"
         else:
             exp_line = "   \u26a0 No expiry"
-        lines.append(f"{v2['id']}. {v2['name']}")
+        lines.append(f"{idx2}. {v2['name']}")
         lines.append(f"   \U0001f4cb {v2['details']}")
         lines.append(exp_line)
         lines.append("")
