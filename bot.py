@@ -166,7 +166,7 @@ def _parse_expiry(text):
         except ValueError:
             pass
 
-    m = re.search(r'(\d{1,2})\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*(?:\s+(\d{2,4}))?', text)
+    m = re.search(r'(\d{1,2})(?:st|nd|rd|th)?\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*(?:\s+(\d{2,4}))?', text)
     if m:
         day, month_name = int(m.group(1)), m.group(2)
         month = _MONTH_NAMES.get(month_name[:3], today.month)
