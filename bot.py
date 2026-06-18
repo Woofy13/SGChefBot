@@ -3985,6 +3985,7 @@ async def add_voucher_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     name = parts[0]
     details = parts[1]
+    details = re.sub(r'(?<!\$)\b(\d+)\b(?!\s*%)', r'$\1', details)
     parsed = None
     if len(parts) >= 3:
         expiry_raw = ", ".join(parts[2:])
@@ -4010,6 +4011,10 @@ async def vouchers_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("No active vouchers.")
         return
     today = date.today()
+    name_count = {}
+    for v in vouchers:
+        name_count[v["name"]] = name_count.get(v["name"], 0) + 1
+    seen = {}
     lines = ["\U0001f39f Your Vouchers", ""]
     buttons = []
     for idx, v in enumerate(vouchers, 1):
@@ -4029,8 +4034,20 @@ async def vouchers_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append(f"   \U0001f4cb {v['details']}")
         lines.append(exp_line)
         lines.append("")
-        buttons.append([InlineKeyboardButton(f"\u2705 Use {v['name']}", callback_data=f"voucher_use_{v['id']}")])
-    await update.message.reply_text("\n".join(lines).strip(), reply_markup=InlineKeyboardMarkup(buttons))
+        n = v["name"]
+        if name_count[n] == 1:
+            label = f"\u2705 {n}"
+        else:
+            seen[n] = seen.get(n, 0) + 1
+            hint = (v.get("details") or "").strip()[:10]
+            if not hint and not v.get("expiry_date"):
+                hint = "no exp"
+            elif not hint:
+                hint = f"#{seen[n]}"
+            label = f"\u2705 {n} ({hint})"
+        buttons.append(InlineKeyboardButton(label, callback_data=f"voucher_use_{v['id']}"))
+    keyboard = [buttons[i:i+3] for i in range(0, len(buttons), 3)]
+    await update.message.reply_text("\n".join(lines).strip(), reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 async def voucher_use_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4048,6 +4065,10 @@ async def voucher_use_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text(f"\u2705 Marked **{v['name']}** as used. No active vouchers remaining.", parse_mode="Markdown")
         return
     today = date.today()
+    name_count = {}
+    for v2 in remaining:
+        name_count[v2["name"]] = name_count.get(v2["name"], 0) + 1
+    seen = {}
     lines = ["\U0001f39f Your Vouchers", ""]
     buttons = []
     for idx2, v2 in enumerate(remaining, 1):
@@ -4067,8 +4088,20 @@ async def voucher_use_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         lines.append(f"   \U0001f4cb {v2['details']}")
         lines.append(exp_line)
         lines.append("")
-        buttons.append([InlineKeyboardButton(f"\u2705 Use {v2['name']}", callback_data=f"voucher_use_{v2['id']}")])
-    await query.edit_message_text("\n".join(lines).strip(), reply_markup=InlineKeyboardMarkup(buttons))
+        n = v2["name"]
+        if name_count[n] == 1:
+            label = f"\u2705 {n}"
+        else:
+            seen[n] = seen.get(n, 0) + 1
+            hint = (v2.get("details") or "").strip()[:10]
+            if not hint and not v2.get("expiry_date"):
+                hint = "no exp"
+            elif not hint:
+                hint = f"#{seen[n]}"
+            label = f"\u2705 {n} ({hint})"
+        buttons.append(InlineKeyboardButton(label, callback_data=f"voucher_use_{v2['id']}"))
+    keyboard = [buttons[i:i+3] for i in range(0, len(buttons), 3)]
+    await query.edit_message_text("\n".join(lines).strip(), reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 async def bill_pay_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
