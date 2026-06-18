@@ -718,28 +718,37 @@ MAX_MSG_LEN = 4000
 
 async def _send_long_message(update, busy, text, keyboard):
     """Split long text across multiple messages, last one gets buttons."""
-    if len(text) <= MAX_MSG_LEN:
-        await busy.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
+    target = busy if busy else (update.effective_message if update else None)
+    if not target:
         return
-    # First chunk replaces the "busy" message (no buttons)
+    if len(text) <= MAX_MSG_LEN:
+        if busy:
+            await busy.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
+        else:
+            await target.reply_text(text, parse_mode="Markdown", reply_markup=keyboard)
+        return
     chunks = []
-    while text:
-        if len(text) <= MAX_MSG_LEN:
-            chunks.append(text)
+    remaining = text
+    while remaining:
+        if len(remaining) <= MAX_MSG_LEN:
+            chunks.append(remaining)
             break
-        split_at = text.rfind("\n\n", 0, MAX_MSG_LEN)
+        split_at = remaining.rfind("\n\n", 0, MAX_MSG_LEN)
         if split_at < MAX_MSG_LEN // 2:
-            split_at = text.rfind("\n", 0, MAX_MSG_LEN)
+            split_at = remaining.rfind("\n", 0, MAX_MSG_LEN)
         if split_at < MAX_MSG_LEN // 2:
             split_at = MAX_MSG_LEN
         else:
             split_at += 1
-        chunks.append(text[:split_at])
-        text = text[split_at:]
-    await busy.edit_text(chunks[0], parse_mode="Markdown")
+        chunks.append(remaining[:split_at])
+        remaining = remaining[split_at:]
+    if busy:
+        await busy.edit_text(chunks[0], parse_mode="Markdown")
+    else:
+        await target.reply_text(chunks[0], parse_mode="Markdown")
     for chunk in chunks[1:-1]:
-        await busy.reply_text(chunk, parse_mode="Markdown")
-    await busy.reply_text(chunks[-1], parse_mode="Markdown", reply_markup=keyboard)
+        await target.reply_text(chunk, parse_mode="Markdown")
+    await target.reply_text(chunks[-1], parse_mode="Markdown", reply_markup=keyboard)
 
 
 async def _reply_chunked(update_or_msg, text, parse_mode=None, reply_markup=None):
@@ -2222,6 +2231,30 @@ async def _handle_user_text(update, context, user_id, text):
                 sanitized = _sanitize_markdown(text_out)
                 await _reply_chunked(update.effective_message, sanitized, parse_mode="Markdown", reply_markup=keyboard)
                 return
+
+    # --- Regex pre-checks for add/remove (bypass AI) ---
+    add_match = re.match(r"(?:add|put|store|i have|i've got|got|have)\s+(.+?)(?:\s+(?:to|in|into|the)\s+pantry)?$", t_lower)
+    if add_match:
+        raw = add_match.group(1)
+        items = [x.strip() for x in re.split(r'[,&]|\s+and\s+', raw) if x.strip()]
+        if items:
+            expiry = _parse_expiry(raw)
+            eff_id = _effective_user_id(user_id)
+            db.add_pantry_items(eff_id, items, expiry=expiry)
+            cat_map = ai.categorize_pantry_items(items)
+            if cat_map:
+                db.recategorize_by_map(eff_id, cat_map)
+            await update.effective_message.reply_text(f"Added {len(items)} item(s): {', '.join(items)}")
+            return
+
+    remove_match = re.match(r"(?:remove|delete|discard)\s+(.+?)(?:\s+(?:from|off|the)\s+pantry)?$", t_lower)
+    if remove_match:
+        items = [x.strip() for x in re.split(r'[,&]|\s+and\s+', remove_match.group(1)) if x.strip()]
+        if items:
+            eff_id = _effective_user_id(user_id)
+            db.remove_pantry_items(eff_id, items)
+            await update.effective_message.reply_text(f"Removed {len(items)} item(s): {', '.join(items)}")
+            return
 
     # --- NL Processing ---
     msg = await update.effective_message.reply_text("Thinking...")
