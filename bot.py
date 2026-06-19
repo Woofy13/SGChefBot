@@ -58,6 +58,8 @@ _receipt_items = TTLCache(maxsize=500, ttl=3600)
 
 _pref_cache = TTLCache(maxsize=1000, ttl=300)
 
+_calc_state = TTLCache(maxsize=100, ttl=3600)
+
 
 def _get_prefs(user_id):
     cached = _pref_cache.get(user_id)
@@ -2720,8 +2722,128 @@ def _render_shopping_list(user_id):
             row = []
     if row:
         keyboard.append(row)
-    keyboard.append([InlineKeyboardButton("🗑 Clear checked", callback_data="shop_clear_checked")])
+    keyboard.append([
+        InlineKeyboardButton("\U0001f9ee Calc", callback_data="calc_open"),
+        InlineKeyboardButton("\U0001f5d1 Clear checked", callback_data="shop_clear_checked"),
+    ])
     return "\n".join(lines), InlineKeyboardMarkup(keyboard)
+
+
+def _render_calculator(user_id):
+    state = _calc_state.get(user_id, {"expr": ""})
+    expr = state["expr"]
+    lines = ["\U0001f9ee *Calculator*", ""]
+    if expr:
+        lines.append(f"`{expr}`")
+        try:
+            safe = re.sub(r'[^\d+\-*/. ]', "", expr)
+            if safe and not re.search(r'[+\-*/.]{2,}', safe) and not safe.startswith(("+", "*", "/", ".")):
+                total = eval(safe)
+                if total == int(total):
+                    total = int(total)
+                lines.append(f"`= {total:,}`")
+            else:
+                lines.append("")
+        except Exception:
+            lines.append("")
+    else:
+        lines.append("_Tap numbers and operators_\n")
+    text = "\n".join(lines)
+    kb = [
+        [InlineKeyboardButton("7", callback_data="calc_d_7"), InlineKeyboardButton("8", callback_data="calc_d_8"), InlineKeyboardButton("9", callback_data="calc_d_9"), InlineKeyboardButton("\u00f7", callback_data="calc_o_/")],
+        [InlineKeyboardButton("4", callback_data="calc_d_4"), InlineKeyboardButton("5", callback_data="calc_d_5"), InlineKeyboardButton("6", callback_data="calc_d_6"), InlineKeyboardButton("\u00d7", callback_data="calc_o_*")],
+        [InlineKeyboardButton("1", callback_data="calc_d_1"), InlineKeyboardButton("2", callback_data="calc_d_2"), InlineKeyboardButton("3", callback_data="calc_d_3"), InlineKeyboardButton("-", callback_data="calc_o_-")],
+        [InlineKeyboardButton("0", callback_data="calc_d_0"), InlineKeyboardButton(".", callback_data="calc_dot"), InlineKeyboardButton("%", callback_data="calc_pct"), InlineKeyboardButton("+", callback_data="calc_o_+")],
+        [InlineKeyboardButton("C", callback_data="calc_clear"), InlineKeyboardButton("\u232b", callback_data="calc_bs"), InlineKeyboardButton("=", callback_data="calc_eq")],
+        [InlineKeyboardButton("\U0001f519 Back to List", callback_data="calc_back")],
+    ]
+    return text, InlineKeyboardMarkup(kb)
+
+
+def _calc_discount(expr, pct):
+    """Apply pct% discount to the running total before the last number."""
+    m = re.search(r'([+\-]?\s*[\d.]+)\s*$', expr)
+    if not m:
+        return expr + f" - 0"
+    last_num_str = m.group(1)
+    base_expr = expr[:m.start()].strip()
+    if not base_expr or base_expr in ("+", "-"):
+        base_expr = "0"
+    try:
+        safe_base = re.sub(r'[^\d+\-*/. ]', "", base_expr)
+        base_total = eval(safe_base) if safe_base else 0
+    except Exception:
+        base_total = 0
+    try:
+        pct_val = float(pct)
+        discount = base_total * pct_val / 100
+        if discount == int(discount):
+            discount = int(discount)
+    except Exception:
+        discount = 0
+    new_expr = expr[:m.start()].strip()
+    new_expr = re.sub(r'[+\-]\s*$', "", new_expr).strip()
+    if new_expr:
+        return f"{new_expr} - {discount}"
+    return f"0 - {discount}"
+
+
+async def calc_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = _effective_user_id(query.from_user.id)
+    data = query.data
+
+    state = _calc_state.get(user_id, {"expr": ""})
+    expr = state["expr"]
+
+    if data == "calc_open":
+        _calc_state.pop(user_id, None)
+        expr = ""
+    elif data == "calc_back":
+        _calc_state.pop(user_id, None)
+        text, kb = _render_shopping_list(user_id)
+        if text:
+            await query.edit_message_text(text, parse_mode="Markdown", reply_markup=kb)
+        return
+    elif data == "calc_clear":
+        expr = ""
+    elif data == "calc_bs":
+        expr = expr[:-1]
+    elif data == "calc_eq":
+        safe = re.sub(r'[^\d+\-*/. ]', "", expr)
+        try:
+            if safe and not re.search(r'[+\-*/.]{2,}', safe) and not safe.startswith(("+", "*", "/", ".")):
+                total = eval(safe)
+                if total == int(total):
+                    total = int(total)
+                expr = str(total)
+        except Exception:
+            pass
+    elif data == "calc_pct":
+        m = re.search(r'([\d.]+)\s*$', expr)
+        if m:
+            pct = m.group(1)
+            expr = _calc_discount(expr, pct)
+        else:
+            expr += "%"
+    elif data.startswith("calc_d_"):
+        digit = data.split("_")[2]
+        expr += digit
+    elif data.startswith("calc_o_"):
+        op = data.split("_")[2]
+        if op == "/":
+            op = "/"
+        elif op == "*":
+            op = "*"
+        expr += op
+    elif data == "calc_dot":
+        expr += "."
+
+    _calc_state[user_id] = {"expr": expr}
+    text, kb = _render_calculator(user_id)
+    if text:
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=kb)
 
 
 async def shop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4514,6 +4636,7 @@ def create_app(token: str):
     app.add_handler(CallbackQueryHandler(random_switch_callback, pattern="^random_switch$"))
     app.add_handler(CallbackQueryHandler(delete_recipe_callback, pattern="^delrecipe_"))
     app.add_handler(CallbackQueryHandler(view_recipe_callback, pattern="^viewrecipe_"))
+    app.add_handler(CallbackQueryHandler(calc_callback, pattern="^calc_"))
     app.add_handler(CallbackQueryHandler(shop_callback, pattern="^shop_"))
     app.add_handler(CallbackQueryHandler(receipt_confirm_callback, pattern="^receipt_confirm$"))
     app.add_handler(CommandHandler("parse", parse_statement))
