@@ -106,6 +106,14 @@ def _ai_call(prompt, system_msg, temperature=0.5, max_tokens=600, return_usage=F
     return text
 
 
+SINGAPORE_NOTE = (
+    "Note: The user cooks in Singapore. "
+    "Tortilla/wrap size is 20 cm max (not 30 cm). "
+    "Fresh corn tortillas, dried Mexican chillies (ancho, guajillo, chipotle), "
+    "tomatillos, cotija, queso fresco, and crema are generally unavailable. "
+    "Substitute with local alternatives where appropriate.\n"
+)
+
 CHEF_PERSONA = (
     "You are my AI Expert Chef Assistant. Think and respond like a professional chef, "
     "not a cookbook. You analyze ingredients, techniques, and interactions like a culinary scientist. "
@@ -124,14 +132,6 @@ CHEF_JSON_SYSTEM = (
     "in the dish choices and descriptions, not in explanatory text. "
     "If you include any text outside the JSON array, the system will crash. "
     + SINGAPORE_NOTE
-)
-
-SINGAPORE_NOTE = (
-    "Note: The user cooks in Singapore. "
-    "Tortilla/wrap size is 20 cm max (not 30 cm). "
-    "Fresh corn tortillas, dried Mexican chillies (ancho, guajillo, chipotle), "
-    "tomatillos, cotija, queso fresco, and crema are generally unavailable. "
-    "Substitute with local alternatives where appropriate.\n"
 )
 
 COMMON_STAPLES = "salt, pepper, sugar, cooking oil, soy sauce, garlic, onion, ginger, eggs, rice, cooking wine, cornstarch, chilli sauce"
