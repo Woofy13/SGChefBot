@@ -1644,20 +1644,21 @@ async def stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
 
     if data == "stats_dishes":
-        entries = db.get_cooking_log_entries(user_id)
-        if not entries:
+        dishes = db.get_cooked_dishes(user_id)
+        if not dishes:
             await query.edit_message_text("No dishes cooked yet.")
             return
         lines = ["📋 *Dish History*", ""]
+        entries_by_name = {}
+        for e in db.get_cooking_log_entries(user_id):
+            entries_by_name.setdefault(e["dish_name"], []).append(e)
         buttons_row = []
-        for i, e in enumerate(entries, 1):
-            try:
-                d = date.fromisoformat(e["cooked_date"]).strftime("%-d %b")
-            except Exception:
-                d = e["cooked_date"]
-            label = e["dish_name"].title()[:28]
-            lines.append(f"{i}. {label} — {d}")
-            buttons_row.append(InlineKeyboardButton(str(i), callback_data=f"viewcooked_{e['id']}"))
+        for i, (name, cnt) in enumerate(dishes, 1):
+            lines.append(f"{i}. {name.title()} ×{cnt}")
+            e_list = entries_by_name.get(name, [])
+            best = next((x for x in e_list if x.get("recipe_text") or x.get("recipe_id")), e_list[0] if e_list else {})
+            entry_id = best.get("id", 0)
+            buttons_row.append(InlineKeyboardButton(str(i), callback_data=f"viewcooked_{entry_id}"))
         text = "\n".join(lines)
         dish_rows = [buttons_row[i:i+5] for i in range(0, len(buttons_row), 5)]
         dish_rows.append([InlineKeyboardButton("🔙 Back", callback_data="stats_back")])
@@ -1712,7 +1713,14 @@ async def view_cooked_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             [InlineKeyboardButton("\U0001f4be Save to Recipes", callback_data="save_last"),
              InlineKeyboardButton("\U0001f519 Back", callback_data="stats_dishes")],
         ])
-        await query.edit_message_text(recipe_text, parse_mode="Markdown", reply_markup=kb)
+        if len(recipe_text) <= MAX_MSG_LEN:
+            await query.edit_message_text(recipe_text, parse_mode="Markdown", reply_markup=kb)
+        else:
+            await query.edit_message_text(
+                f"📖 *{entry['dish_name'].title()}* recipe sent below \u2193",
+                parse_mode="Markdown",
+            )
+            await _send_long_message(update, query.message, recipe_text, kb)
     else:
         _pending_cooked[user_id] = entry["dish_name"]
         kb = InlineKeyboardMarkup([
