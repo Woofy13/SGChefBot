@@ -2724,7 +2724,7 @@ def _render_shopping_list(user_id):
         keyboard.append(row)
     keyboard.append([
         InlineKeyboardButton("\U0001f9ee Calc", callback_data="calc_open"),
-        InlineKeyboardButton("\U0001f5d1 Clear checked", callback_data="shop_clear_checked"),
+        InlineKeyboardButton("\U0001f5d1 Clear", callback_data="shop_clear_checked"),
     ])
     return "\n".join(lines), InlineKeyboardMarkup(keyboard)
 
@@ -2732,11 +2732,16 @@ def _render_shopping_list(user_id):
 def _render_calculator(user_id):
     state = _calc_state.get(user_id, {"expr": ""})
     expr = state["expr"]
-    lines = ["\U0001f9ee *Calculator*", ""]
+    list_text, _ = _render_shopping_list(user_id) or ("", None)
+    lines = []
+    if list_text:
+        lines.append(list_text)
+        lines.append("")
+    lines.append("\U0001f9ee *Calculator*")
     if expr:
         lines.append(f"`{expr}`")
+        safe = re.sub(r'[^\d+\-*/.% ]', "", expr).replace("%", "/100")
         try:
-            safe = re.sub(r'[^\d+\-*/. ]', "", expr)
             if safe and not re.search(r'[+\-*/.]{2,}', safe) and not safe.startswith(("+", "*", "/", ".")):
                 total = eval(safe)
                 if total == int(total):
@@ -2758,34 +2763,6 @@ def _render_calculator(user_id):
         [InlineKeyboardButton("\U0001f519 Back to List", callback_data="calc_back")],
     ]
     return text, InlineKeyboardMarkup(kb)
-
-
-def _calc_discount(expr, pct):
-    """Apply pct% discount to the running total before the last number."""
-    m = re.search(r'([+\-]?\s*[\d.]+)\s*$', expr)
-    if not m:
-        return expr + f" - 0"
-    last_num_str = m.group(1)
-    base_expr = expr[:m.start()].strip()
-    if not base_expr or base_expr in ("+", "-"):
-        base_expr = "0"
-    try:
-        safe_base = re.sub(r'[^\d+\-*/. ]', "", base_expr)
-        base_total = eval(safe_base) if safe_base else 0
-    except Exception:
-        base_total = 0
-    try:
-        pct_val = float(pct)
-        discount = base_total * pct_val / 100
-        if discount == int(discount):
-            discount = int(discount)
-    except Exception:
-        discount = 0
-    new_expr = expr[:m.start()].strip()
-    new_expr = re.sub(r'[+\-]\s*$', "", new_expr).strip()
-    if new_expr:
-        return f"{new_expr} - {discount}"
-    return f"0 - {discount}"
 
 
 async def calc_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2811,7 +2788,7 @@ async def calc_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "calc_bs":
         expr = expr[:-1]
     elif data == "calc_eq":
-        safe = re.sub(r'[^\d+\-*/. ]', "", expr)
+        safe = re.sub(r'[^\d+\-*/.% ]', "", expr).replace("%", "/100")
         try:
             if safe and not re.search(r'[+\-*/.]{2,}', safe) and not safe.startswith(("+", "*", "/", ".")):
                 total = eval(safe)
@@ -2821,12 +2798,7 @@ async def calc_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
     elif data == "calc_pct":
-        m = re.search(r'([\d.]+)\s*$', expr)
-        if m:
-            pct = m.group(1)
-            expr = _calc_discount(expr, pct)
-        else:
-            expr += "%"
+        expr += "%"
     elif data.startswith("calc_d_"):
         digit = data.split("_")[2]
         expr += digit
