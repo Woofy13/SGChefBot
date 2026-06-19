@@ -1553,7 +1553,15 @@ async def cooked_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if isinstance(title, list):
             await query.edit_message_text("Use the numbered buttons to log each dish individually.")
             return
-        db.log_cooked(user_id, title)
+        recipe_text = _last_suggestion.get(user_id, "")
+        recipe_id = None
+        if _is_saved_recipe.get(user_id, False):
+            found = db.get_recipe_by_title(user_id, title)
+            if found:
+                recipe_id = found["id"]
+                if not recipe_text:
+                    recipe_text = found.get("full_text") or _format_recipe(found)
+        db.log_cooked(user_id, title, recipe_text=recipe_text, recipe_id=recipe_id)
         await query.edit_message_text(f"✅ Logged *{title.title()}* as cooked!", parse_mode="Markdown")
         _pending_cooked.pop(user_id, None)
 
@@ -1636,16 +1644,24 @@ async def stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
 
     if data == "stats_dishes":
-        dishes = db.get_cooked_dishes(user_id)
-        if not dishes:
+        entries = db.get_cooking_log_entries(user_id)
+        if not entries:
             await query.edit_message_text("No dishes cooked yet.")
             return
         lines = ["📋 *Dish History*", ""]
-        for i, (name, cnt) in enumerate(dishes, 1):
-            lines.append(f"{i}. {name.title()} ×{cnt}")
+        buttons_row = []
+        for i, e in enumerate(entries, 1):
+            try:
+                d = date.fromisoformat(e["cooked_date"]).strftime("%-d %b")
+            except Exception:
+                d = e["cooked_date"]
+            label = e["dish_name"].title()[:28]
+            lines.append(f"{i}. {label} — {d}")
+            buttons_row.append(InlineKeyboardButton(str(i), callback_data=f"viewcooked_{e['id']}"))
         text = "\n".join(lines)
-        back_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="stats_back")]])
-        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=back_keyboard)
+        dish_rows = [buttons_row[i:i+5] for i in range(0, len(buttons_row), 5)]
+        dish_rows.append([InlineKeyboardButton("🔙 Back", callback_data="stats_back")])
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(dish_rows))
 
     elif data == "stats_back":
         text, keyboard = _build_stats_message(user_id)
@@ -1670,6 +1686,43 @@ async def stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text, keyboard = _build_stats_message(user_id)
         if text:
             await query.edit_message_text(text, parse_mode="Markdown", reply_markup=keyboard)
+
+
+async def view_cooked_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    entry_id = int(query.data.split("_")[1])
+    entry = db.get_cooking_log_entry(entry_id)
+    if not entry or entry["user_id"] != user_id:
+        await query.edit_message_text("Entry not found.")
+        return
+    recipe_text = entry.get("recipe_text") or ""
+    recipe_id = entry.get("recipe_id")
+    if not recipe_text and recipe_id:
+        recipe = db.get_recipe(user_id, recipe_id)
+        if recipe:
+            recipe_text = recipe.get("full_text") or _format_recipe(recipe)
+    if recipe_text:
+        _last_suggestion[user_id] = recipe_text
+        _is_saved_recipe[user_id] = (recipe_id is not None)
+        _pending_cooked[user_id] = entry["dish_name"]
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("\u2705 Cooked!", callback_data="cooked")],
+            [InlineKeyboardButton("\U0001f4be Save to Recipes", callback_data="save_last"),
+             InlineKeyboardButton("\U0001f519 Back", callback_data="stats_dishes")],
+        ])
+        await query.edit_message_text(recipe_text, parse_mode="Markdown", reply_markup=kb)
+    else:
+        _pending_cooked[user_id] = entry["dish_name"]
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("\u2705 Cooked!", callback_data="cooked")],
+            [InlineKeyboardButton("\U0001f519 Back", callback_data="stats_dishes")],
+        ])
+        await query.edit_message_text(
+            f"No recipe text saved for *{entry['dish_name'].title()}*. You can still log it as cooked.",
+            parse_mode="Markdown", reply_markup=kb,
+        )
 
 
 async def canbake(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4442,6 +4495,7 @@ def create_app(token: str):
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CallbackQueryHandler(cooked_callback, pattern=r"^(cooked|cooked_\d+)$"))
     app.add_handler(CallbackQueryHandler(stats_callback, pattern="^(stats_|reset_stats_|stats_back)"))
+    app.add_handler(CallbackQueryHandler(view_cooked_callback, pattern="^viewcooked_"))
     app.add_handler(CallbackQueryHandler(suggest_callback, pattern="^(save_last|suggest_again|export_last|canbake_again)$"))
     app.add_handler(CallbackQueryHandler(batch_callback, pattern="^batch_"))
     app.add_handler(CallbackQueryHandler(cook_callback, pattern="^cook_next$"))

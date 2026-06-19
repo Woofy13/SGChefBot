@@ -172,6 +172,21 @@ def _init_sqlite():
         pass
 
     try:
+        _execute(conn, "ALTER TABLE cooking_log ADD COLUMN recipe_text TEXT DEFAULT NULL")
+    except Exception:
+        pass
+    try:
+        _execute(conn, "ALTER TABLE cooking_log ADD COLUMN recipe_id INTEGER DEFAULT NULL")
+    except Exception:
+        pass
+
+    # Backfill cooking_log recipe_text + recipe_id from saved recipes
+    try:
+        _execute(conn, "UPDATE cooking_log SET recipe_text = (SELECT full_text FROM recipes WHERE LOWER(recipes.title) = cooking_log.dish_name LIMIT 1), recipe_id = (SELECT id FROM recipes WHERE LOWER(recipes.title) = cooking_log.dish_name LIMIT 1) WHERE recipe_text IS NULL AND recipe_id IS NULL AND EXISTS (SELECT 1 FROM recipes WHERE LOWER(recipes.title) = cooking_log.dish_name)")
+    except Exception:
+        pass
+
+    try:
         # Migrate old NOT NULL expiry_date to nullable
         _execute(conn, "ALTER TABLE vouchers RENAME TO vouchers_old")
         _execute(conn, "CREATE TABLE vouchers (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, name TEXT NOT NULL, details TEXT DEFAULT '', expiry_date TEXT, created_at TEXT DEFAULT (date('now')))")
@@ -500,6 +515,18 @@ def _init_pg():
         pass
     try:
         cur.execute("ALTER TABLE vouchers ALTER COLUMN expiry_date DROP NOT NULL")
+    except Exception:
+        pass
+    try:
+        cur.execute("ALTER TABLE cooking_log ADD COLUMN IF NOT EXISTS recipe_text TEXT")
+    except Exception:
+        pass
+    try:
+        cur.execute("ALTER TABLE cooking_log ADD COLUMN IF NOT EXISTS recipe_id INTEGER")
+    except Exception:
+        pass
+    try:
+        cur.execute("UPDATE cooking_log SET recipe_text = recipes.full_text, recipe_id = recipes.id FROM recipes WHERE LOWER(recipes.title) = cooking_log.dish_name AND cooking_log.recipe_text IS NULL")
     except Exception:
         pass
     for idx in [
@@ -947,10 +974,10 @@ def toggle_shopping_item(item_id):
 # --- Cooking Stats ---
 
 
-def log_cooked(user_id, dish_name):
+def log_cooked(user_id, dish_name, recipe_text="", recipe_id=None):
     conn = get_connection()
-    _execute(conn, _q("INSERT INTO cooking_log (user_id, dish_name) VALUES (?, ?)"),
-             (user_id, dish_name.strip().lower()))
+    _execute(conn, _q("INSERT INTO cooking_log (user_id, dish_name, recipe_text, recipe_id) VALUES (?, ?, ?, ?)"),
+             (user_id, dish_name.strip().lower(), recipe_text or None, recipe_id))
     _commit(conn)
     _close(conn)
 
@@ -1033,6 +1060,22 @@ def get_cooked_dishes(user_id):
     rows = _fetchall(cur)
     _close(conn)
     return [(r["dish_name"], r["cnt"]) for r in rows]
+
+
+def get_cooking_log_entries(user_id):
+    conn = get_connection()
+    cur = _execute(conn, _q("SELECT id, dish_name, cooked_date, recipe_text, recipe_id FROM cooking_log WHERE user_id = ? ORDER BY cooked_date DESC, id DESC"), (user_id,))
+    rows = _fetchall(cur)
+    _close(conn)
+    return rows
+
+
+def get_cooking_log_entry(entry_id):
+    conn = get_connection()
+    cur = _execute(conn, _q("SELECT id, user_id, dish_name, cooked_date, recipe_text, recipe_id FROM cooking_log WHERE id = ?"), (entry_id,))
+    row = _fetchone(cur)
+    _close(conn)
+    return row
 
 
 def clear_cooking_log(user_id):
