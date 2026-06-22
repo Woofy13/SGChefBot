@@ -45,8 +45,17 @@ def _extract_json_array(text):
     logger.error("No JSON array found. Raw response (first 500 chars): %s", text[:500])
     raise ValueError("No JSON array found in response")
 
-
 MAX_TOKENS_CAP = 10000
+
+
+def _fix_json(text):
+    """Fix common JSON issues from AI output."""
+    text = re.sub(r',\s*}', '}', text)
+    text = re.sub(r',\s*]', ']', text)
+    text = re.sub(r'(?m)//.*$', '', text)
+    text = re.sub(r'/\*.*?\*/', '', text, flags=re.DOTALL)
+    return text
+
 
 def _ai_call(prompt, system_msg, temperature=0.5, max_tokens=600, return_usage=False):
     global _daily_count, _daily_date
@@ -1193,14 +1202,14 @@ def parse_statement(statement_text, rulebook_text):
         "Extract all transactions per the rules above. Every transaction MUST include category, subcategory (empty for income), account, and tx_type fields. Return ONLY the JSON object."
     )
     try:
-        text = _ai_call(prompt, system_msg, temperature=0.1, max_tokens=4000)
+        text = _ai_call(prompt, system_msg, temperature=0.1, max_tokens=1500)
         if not text:
             return {"transactions": [], "unclear_items": [], "due_date": ""}
         text = text.strip()
         text = text.replace("```json", "").replace("```", "").strip()
         start, end = text.find("{"), text.rfind("}")
         if start >= 0 and end > start:
-            text = text[start:end + 1]
+            text = _fix_json(text[start:end + 1])
         result = json.loads(text)
         if not isinstance(result, dict):
             return {"transactions": [], "unclear_items": [], "due_date": ""}
