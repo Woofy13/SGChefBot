@@ -7,7 +7,7 @@ import html.parser
 from datetime import date
 from openai import OpenAI
 from ddgs import DDGS
-from config import GROQ_API_KEY, GROQ_VISION_MODEL, DEEPSEEK_API_KEY, DEEPSEEK_MODEL, OWNER_TELEGRAM_ID
+from config import GROQ_API_KEY, GROQ_MODEL, GROQ_VISION_MODEL, DEEPSEEK_API_KEY, DEEPSEEK_MODEL, OWNER_TELEGRAM_ID
 
 client = OpenAI(
     api_key=DEEPSEEK_API_KEY,
@@ -112,6 +112,53 @@ def _ai_call(prompt, system_msg, temperature=0.5, max_tokens=600, return_usage=F
     if return_usage:
         return text, {"prompt": usage.prompt_tokens, "completion": usage.completion_tokens,
                       "cache_hit": cache_hit, "total": usage.total_tokens}
+    return text
+
+
+def _ai_call_groq(prompt, system_msg, temperature=0.5, max_tokens=600):
+    global _daily_count, _daily_date
+
+    today = date.today()
+    if today != _daily_date:
+        _daily_count = 0
+        _daily_date = today
+
+    if _daily_count >= DAILY_LIMIT:
+        raise RuntimeError("AI daily request limit reached (~1,500). Try again after midnight UTC.")
+
+    msg = [{"role": "system", "content": system_msg}, {"role": "user", "content": prompt}]
+    try:
+        resp = groq_client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=msg,
+            temperature=temperature,
+            max_tokens=min(max_tokens, 10000),
+        )
+    except Exception as e:
+        err_str = str(e)
+        if "429" in err_str or "Too Many Requests" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+            raise RuntimeError("AI rate limit hit. Please try again in a moment.")
+        if "503" in err_str or "UNAVAILABLE" in err_str or "500" in err_str:
+            raise RuntimeError("AI is temporarily unavailable (high demand). Please try again in a moment.")
+        raise
+
+    _daily_count += 1
+    text = resp.choices[0].message.content
+    text = text.strip()
+    usage = resp.usage
+    cache_hit = 0
+    if hasattr(usage, 'prompt_cache_hit_tokens'):
+        try:
+            cache_hit = int(usage.prompt_cache_hit_tokens or 0)
+        except (TypeError, ValueError):
+            cache_hit = 0
+    logger.info("Groq Tokens: %d prompt (+%d cache hit) + %d completion = %d total",
+                usage.prompt_tokens, cache_hit, usage.completion_tokens, usage.total_tokens)
+    try:
+        import database as _db
+        _db.record_token_usage(0, usage.prompt_tokens, usage.completion_tokens, cache_hit, GROQ_MODEL)
+    except Exception:
+        pass
     return text
 
 
@@ -1229,7 +1276,7 @@ def parse_statement(statement_text, rulebook_text):
         "Extract every single transaction. Each on its own tab-separated line."
     )
     try:
-        text = _ai_call(prompt, system_msg, temperature=0.1, max_tokens=20000)
+        text = _ai_call_groq(prompt, system_msg, temperature=0.1, max_tokens=20000)
         logger.info("parse_statement raw (first 500): %s", (text or "")[:500])
         if not text:
             return {"transactions": [], "unclear_items": [], "due_date": ""}
@@ -1317,7 +1364,7 @@ def parse_bill_input(user_text):
     )
     prompt = f'User input: "{user_text}"\n\nReturn ONLY the JSON object.'
     try:
-        text = _ai_call(prompt, system_msg, temperature=0.1, max_tokens=200)
+        text = _ai_call_groq(prompt, system_msg, temperature=0.1, max_tokens=200)
         if not text:
             return {"error": "Could not parse. Try: add bill OCBC 2097 400 6 May"}
         text = text.strip()
@@ -1428,7 +1475,7 @@ def batch_identify_merchants(merchant_names, rulebook_text, full_statement_text=
         "Identify each merchant. Return ONLY the JSON object."
     )
     try:
-        text = _ai_call(prompt, system_msg, temperature=0.1, max_tokens=2000)
+        text = _ai_call_groq(prompt, system_msg, temperature=0.1, max_tokens=2000)
         if not text:
             return {"identifications": [], "still_unclear": merchant_names}
         text = text.strip()
@@ -1483,7 +1530,7 @@ def parse_edit_natural(user_message, current_tx, rulebook_text=""):
         "Extract the corrections and return ONLY the JSON object."
     )
     try:
-        text = _ai_call(prompt, system_msg, temperature=0.1, max_tokens=300)
+        text = _ai_call_groq(prompt, system_msg, temperature=0.1, max_tokens=300)
         if not text:
             return None
         text = text.strip()
