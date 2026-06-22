@@ -4119,7 +4119,7 @@ def _render_bills(user_id):
     if not bills:
         return None, None
     today = date.today()
-    lines = ["\U0001f4cb Upcoming Bills", "\u2501" * 23]
+    lines = ["\U0001f4cb Upcoming Bills"]
     for b in bills:
         try:
             due = date.fromisoformat(b["due_date"])
@@ -4143,10 +4143,8 @@ def _render_bills(user_id):
             last4 = db.get_card_last4(user_id, b["card_name"])
         last4_str = f" **{last4}**" if last4 else ""
         lines.append(f"{icon} #{b['id']} {b['card_name'].upper()}{last4_str}  ${b['amount']:.2f}  \u2014 due {due.strftime('%b %-d')} ({when})")
-    lines.append("\u2501" * 23)
     total = sum(b["amount"] for b in bills)
     lines.append(f"Total: ${total:.2f}")
-    lines.append("Tap a number to mark that bill as paid:")
     keyboard = []
     row = []
     for b in bills:

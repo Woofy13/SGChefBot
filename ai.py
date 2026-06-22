@@ -1241,7 +1241,8 @@ def parse_statement(statement_text, rulebook_text):
                         if item:
                             unclear_items.append(item)
                 elif line.upper().startswith("# DUE_DATE"):
-                    due_date = line.split(":", 1)[1].strip() if ":" in line else ""
+                    raw = line.split(":", 1)[1].strip() if ":" in line else ""
+                    due_date = _mmddyyyy_to_ddmmyy(raw)
                 continue
 
             parts = line.split("\t")
