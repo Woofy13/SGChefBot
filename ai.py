@@ -1345,11 +1345,43 @@ def parse_bill_input(user_text):
 # --- Merchant Identification via Web Search ---
 
 
-def _search_merchant(merchant_name):
+_COUNTRY_HINTS = {
+    "japan": ["japan", "jp", "jpy", "yen", "¥", "you trip", "wise", "revolut", "tokyo", "osaka", "kyoto"],
+    "thailand": ["thailand", "th", "thb", "baht", "฿", "bangkok", "phuket", "pattaya"],
+    "china": ["china", "cn", "cny", "yuan", "renminbi", "beijing", "shanghai", "shenzhen", "guangzhou"],
+    "korea": ["korea", "kr", "krw", "won", "₩", "seoul", "busan"],
+    "malaysia": ["malaysia", "my", "myr", "ringgit", "rm", "kl", "kuala lumpur", "jb", "johor"],
+    "vietnam": ["vietnam", "vn", "vnd", "dong", "₫", "hanoi", "ho chi minh", "saigon"],
+    "indonesia": ["indonesia", "id", "idr", "rupiah", "rp", "jakarta", "bali"],
+}
+
+
+def _detect_statement_country(statement_text):
+    if not statement_text:
+        return ""
+    low = statement_text.lower()
+    # Check for multi-currency/overseas card names first — these suggest non-SG spending
+    overseas_cards = ["youtrip", "wise", "revolut", "instarem", "you trip"]
+    has_overseas_card = any(c in low for c in overseas_cards)
+    for country, hints in _COUNTRY_HINTS.items():
+        for hint in hints:
+            if hint in low:
+                return country
+    # If no country hint but has an overseas card, return empty (generic search)
+    if has_overseas_card:
+        return ""
+    return "singapore"  # default
+
+
+def _search_merchant(merchant_name, country=""):
     snippets = None
     try:
         with DDGS(timeout=5) as ddgs:
-            results = ddgs.text(f'"{merchant_name}" Singapore OR Malaysia merchant', max_results=4)
+            if country:
+                query = f'"{merchant_name}" {country} merchant'
+            else:
+                query = f'"{merchant_name}" merchant'
+            results = ddgs.text(query, max_results=4)
             snippets = []
             for r in results:
                 snippets.append(f"Title: {r.get('title', '')}\n{r.get('body', '')}")
@@ -1363,24 +1395,31 @@ def _search_merchant(merchant_name):
 def batch_identify_merchants(merchant_names, rulebook_text, full_statement_text=""):
     if not merchant_names:
         return {"identifications": [], "still_unclear": []}
+    country = _detect_statement_country(full_statement_text)
     search_results = {}
     for m in merchant_names:
         m = m.strip()
         if m:
-            search_results[m] = _search_merchant(m)
+            search_results[m] = _search_merchant(m, country)
     search_block = "\n\n---\n\n".join(
         f"MERCHANT: \"{m}\"\nWeb results:\n{search_results[m]}"
         for m in merchant_names
     )
+    geo_note = (
+        f"The statement appears to be from {country.upper()}. " if country else
+        "Merchants may be from any country. "
+    )
     system_msg = (
         "You identify unknown merchants from bank/credit card statements.\n"
         "Given merchant names, web search results, and the full statement context, identify ALL merchants.\n"
+        f"{geo_note}"
+        "Merchants may be from Singapore, Malaysia, Japan, Thailand, China, Korea, or other countries.\n"
         "Return ONLY JSON: {\"identifications\": [{\"original_name\": \"...\", \"merchant\": \"cleaned name\", \"category\": \"...\", \"subcategory\": \"...\", \"account\": \"...\", \"tx_type\": \"Expense\"|\"Income\", \"confidence\": \"high\"|\"medium\"|\"low\", \"description\": \"one-line what it is\"}], \"still_unclear\": []}\n"
         "For confident identifications, include all fields. For truly uncertain ones, put the original_name in still_unclear.\n"
         "category is main category (Food, Transportation, Health, Shopping, etc.).\n"
         "subcategory can be: Eating Out, Groceries, Snacks, Dessert, Taxi, Medicine, Optical, etc.\n"
         "tx_type is Expense for purchases.\n"
-        "Use the statement context (dates, amounts, neighboring transactions) to fill in truncated names.\n"
+        "Use the statement context (dates, amounts, neighboring transactions) and your knowledge of global merchants to fill in truncated names.\n"
         "Do not include any text outside the JSON object."
     )
     prompt = (
