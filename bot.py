@@ -3673,7 +3673,7 @@ async def handle_finance_document(update: Update, context: ContextTypes.DEFAULT_
     if not doc:
         return
     fname = (doc.file_name or "").lower()
-    is_text = fname.endswith(".txt") or fname.endswith(".csv")
+    is_text = fname.endswith(".txt") or fname.endswith(".csv") or fname.endswith(".tsv")
     is_pdf = fname.endswith(".pdf")
     if not is_text and not is_pdf:
         return
