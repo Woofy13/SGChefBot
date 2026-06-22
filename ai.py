@@ -1180,29 +1180,21 @@ def suggest_random_item(country="", exclude=None, item_type="any"):
 
 def parse_statement(statement_text, rulebook_text):
     system_msg = (
-        "You are a bank statement parser. Given a statement and a rulebook, extract each transaction.\n"
-        "Return ONLY JSON: {\"transactions\": [{\"date\": \"...\", \"merchant\": \"...\", \"amount\": 123.45, \"category\": \"...\", \"subcategory\": \"...\", \"account\": \"...\", \"tx_type\": \"Expense\"|\"Income\", \"confidence\": \"high\"|\"medium\"|\"low\", \"notes\": \"\"}], \"unclear_items\": [\"item1\", \"item2\"], \"due_date\": \"DD/MM/YY or empty\"}.\n"
-        "Use the rulebook to determine categories for known merchants.\n"
-        "category is the main category only (e.g. \"Food\", \"Transportation\", \"Shopping\", \"Salary\", \"Bonus\", \"Other / Reimbursement\"). For income, use the income category name as-is (e.g. \"Other / Reimbursement\" is a single category, NOT split).\n"
-        "subcategory is the subcategory or empty string. Income categories (Allowance, Salary, Bonus, Investment, Other / Reimbursement) ALWAYS have empty subcategory. Expense categories like Holiday, Gift, Other, Insurance, Gaming, Loan, Income Tax also have empty subcategory.\n"
-        "tx_type is \"Expense\" for purchases/payments, \"Income\" for salary, bonuses, refunds, reimbursements, dividends, cash rebates, etc.\n"
-        "account MUST be one of the Account Names listed in the rulebook (e.g. POSB, UOB PPV, Citi Rewards (Amaze), UOB Lady, DBS Altitude, SC SimplyCash, YouTrip, OCBC 365, MariBank). Determine the account from the statement context (the statement title/header, the card name, or rulebook hints like 'AMAZE* prefix -> Citi Rewards (Amaze)'). If you cannot determine the account, use the most likely one based on the statement source.\n"
-        "If a merchant matches no rule, mark confidence as \"low\".\n"
-        "If a due date is found (for credit card statements), include it in due_date.\n"
-        "Do NOT include transactions with confidence \"low\" in the transactions array — put them as strings in unclear_items instead.\n"
-        "Dates must be DD/MM/YY format. Amounts are positive numbers in SGD (use absolute value).\n"
-        "Strip out transactions the rulebook says to remove (salary if it says remove, insurance if it says remove, transfers, ATM withdrawals, card fees, etc.) — do not include them at all. BUT include income transactions the rulebook says to KEEP (e.g. ACCOUNTANT-GENERAL <$100 -> Other / Reimbursement / Income; PayNow from specific people -> Bonus / Income; CDP Dividends -> Investment / Income; cash rebate -> Other / Reimbursement / Income).\n"
-        "Do not include any text outside the JSON object."
+        "You are a bank statement parser. Return ONLY a JSON object:\n"
+        "{\"transactions\":[{\"date\":\"DD/MM/YY\",\"merchant\":\"\",\"amount\":0.0,\"category\":\"\",\"subcategory\":\"\",\"account\":\"\",\"tx_type\":\"Expense\"|\"Income\",\"confidence\":\"high\"|\"medium\"|\"low\",\"notes\":\"\"}],\"unclear_items\":[\"\"],\"due_date\":\"DD/MM/YY\"}\n"
+        "Use the rulebook for categories. Low-confidence items go as strings in unclear_items.\n"
+        "Dates in DD/MM/YY. Amounts positive. No text outside the JSON. Be concise."
     )
     prompt = (
         f"RULEBOOK:\n{rulebook_text}\n\n"
         f"---\n\n"
         f"STATEMENT:\n{statement_text}\n\n"
         f"---\n\n"
-        "Extract all transactions per the rules above. Every transaction MUST include category, subcategory (empty for income), account, and tx_type fields. Return ONLY the JSON object."
+        "Extract all transactions per the rulebook. Be concise — minimize whitespace."
     )
     try:
         text = _ai_call(prompt, system_msg, temperature=0.1, max_tokens=5000)
+        logger.info("parse_statement raw (first 500): %s", (text or "")[:500])
         if not text:
             return {"transactions": [], "unclear_items": [], "due_date": ""}
         text = text.strip()
