@@ -1178,20 +1178,41 @@ def suggest_random_item(country="", exclude=None, item_type="any"):
 # --- Bank Statement Parser ---
 
 
+def _mmddyyyy_to_ddmmyy(d):
+    if not d:
+        return ""
+    d = d.strip()
+    parts = re.split(r'[/\-\.]', d)
+    if len(parts) >= 3:
+        mm, dd, yy = parts[0], parts[1], parts[2]
+        if len(mm) == 1:
+            mm = "0" + mm
+        if len(dd) == 1:
+            dd = "0" + dd
+        if len(yy) == 4:
+            yy = yy[2:]
+        elif len(yy) == 1:
+            yy = "0" + yy
+        return f"{dd}/{mm}/{yy}"
+    return d
+
+
 def parse_statement(statement_text, rulebook_text):
     system_msg = (
-        "You are a bank statement parser. Return ONLY a JSON object:\n"
-        "{\"transactions\":[{\"date\":\"DD/MM/YY\",\"merchant\":\"\",\"amount\":0.0,\"category\":\"\",\"subcategory\":\"\",\"account\":\"\",\"tx_type\":\"Expense\"|\"Income\",\"confidence\":\"high\"|\"medium\"|\"low\",\"notes\":\"\"}],\"unclear_items\":[\"\"],\"due_date\":\"DD/MM/YY\"}\n"
-        "Use the rulebook for categories. Low-confidence items go as strings in unclear_items.\n"
-        "Dates in DD/MM/YY. Amounts positive. No text outside the JSON. Be concise. "
-        "Do NOT use chain-of-thought or <think> reasoning. Output only the JSON directly."
+        "You are a bank statement parser. Output TSV with this header:\n"
+        "Date\tAccount\tCategory\tSubcategory\tNote\tAmount\tIncome/Expense\tDescription\n\n"
+        "Rules: dates mm/dd/yyyy, amounts positive, Description always blank.\n"
+        "High/medium confidence transactions go in the TSV. Uncertain merchants go in:\n"
+        "# UNCLEAR: merchant1, merchant2\n"
+        "# DUE_DATE: mm/dd/yyyy\n\n"
+        "No <think> reasoning. Output only TSV and # comment lines."
     )
     prompt = (
         f"RULEBOOK:\n{rulebook_text}\n\n"
         f"---\n\n"
         f"STATEMENT:\n{statement_text}\n\n"
         f"---\n\n"
-        "Extract all transactions per the rulebook. Be concise — minimize whitespace."
+        "Extract all transactions. Output TSV + # comments. Be concise."
     )
     try:
         text = _ai_call(prompt, system_msg, temperature=0.1, max_tokens=20000)
@@ -1199,24 +1220,89 @@ def parse_statement(statement_text, rulebook_text):
         if not text:
             return {"transactions": [], "unclear_items": [], "due_date": ""}
         text = text.strip()
-        text = text.replace("```json", "").replace("```", "").strip()
-        start, end = text.find("{"), text.rfind("}")
-        if start >= 0 and end > start:
-            text = _fix_json(text[start:end + 1])
-        result = json.loads(text)
-        if not isinstance(result, dict):
-            return {"transactions": [], "unclear_items": [], "due_date": ""}
-        if not isinstance(result.get("transactions"), list):
-            result["transactions"] = []
-        if not isinstance(result.get("unclear_items"), list):
-            result["unclear_items"] = []
-        if not result.get("due_date"):
-            result["due_date"] = ""
-        return result
+        text = text.replace("```tsv", "").replace("```", "").strip()
+
+        transactions = []
+        unclear_items = []
+        due_date = ""
+        header_found = False
+
+        for line in text.split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith("#"):
+                if line.upper().startswith("# UNCLEAR"):
+                    items = line.split(":", 1)[1] if ":" in line else ""
+                    for item in items.split(","):
+                        item = item.strip()
+                        if item:
+                            unclear_items.append(item)
+                elif line.upper().startswith("# DUE_DATE"):
+                    due_date = line.split(":", 1)[1].strip() if ":" in line else ""
+                continue
+
+            parts = line.split("\t")
+            if not header_found:
+                if parts and parts[0].lower() == "date":
+                    header_found = True
+                continue
+
+            if len(parts) < 6:
+                continue
+
+            date_raw = parts[0].strip()
+            account = parts[1].strip() if len(parts) > 1 else ""
+            raw_cat = parts[2].strip() if len(parts) > 2 else ""
+            subcategory = parts[3].strip() if len(parts) > 3 else ""
+            merchant = parts[4].strip() if len(parts) > 4 else ""
+
+            try:
+                amount = float(parts[5].replace(",", "").strip())
+            except (ValueError, TypeError):
+                amount = 0.0
+
+            tx_type = parts[6].strip() if len(parts) > 6 else "Expense"
+            if tx_type not in ("Expense", "Income"):
+                tx_type = "Expense"
+
+            if raw_cat and subcategory:
+                category = raw_cat
+            elif raw_cat and "/" in raw_cat:
+                parts_cat = raw_cat.split("/", 1)
+                category = parts_cat[0].strip()
+                subcategory = parts_cat[1].strip()
+            else:
+                category = raw_cat
+                subcategory = subcategory or ""
+
+            # Convert from mm/dd/yyyy to internal dd/mm/yy
+            date_internal = _mmddyyyy_to_ddmmyy(date_raw)
+
+            transactions.append({
+                "date": date_internal,
+                "merchant": merchant,
+                "amount": amount,
+                "category": category,
+                "subcategory": subcategory,
+                "account": account,
+                "tx_type": tx_type,
+                "confidence": "high",
+                "notes": merchant,
+            })
+
+        # Remove unclear items that were successfully parsed
+        parsed_merchants = {t["merchant"].lower() for t in transactions if t["merchant"]}
+        unclear_items = [i for i in unclear_items if i.lower() not in parsed_merchants]
+
+        return {
+            "transactions": transactions,
+            "unclear_items": unclear_items,
+            "due_date": due_date,
+        }
     except Exception:
         logger.exception("parse_statement failed")
         return {"transactions": [], "unclear_items": [], "due_date": "", "error": "Failed to parse statement"}
-
 
 # --- Bill Input Parser ---
 
