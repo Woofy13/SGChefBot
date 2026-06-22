@@ -1,4 +1,4 @@
-python-telegram-bot>=20.7
+python-telegram-bot[job-queue]>=20.7
 openai>=1.0.0
 python-dotenv>=1.0.0
 ddgs>=9.0.0
