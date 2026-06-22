@@ -2533,9 +2533,54 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         edit_tx_id = _parse_edit.get(user_id)
         if edit_tx_id is not None:
             _parse_edit.pop(user_id, None)
-            ok, msg = _apply_correction(user_id, edit_tx_id, text)
-            await update.effective_message.reply_text(msg, parse_mode="Markdown")
             tx = db.get_parsed_transaction(edit_tx_id)
+            if not tx:
+                await update.effective_message.reply_text("Transaction not found.")
+                return
+            result = ai.parse_edit_natural(text, tx, _load_rulebook(user_id))
+            if not result:
+                await update.effective_message.reply_text(
+                    "Couldn't understand that. Try: \"it's Si Si Nan Chun, Food/Eating Out\""
+                )
+                return
+            update_fields = {}
+            for field in ("merchant", "category", "subcategory", "account", "tx_type", "notes"):
+                val = result.get(field)
+                if val:
+                    update_fields[field] = val
+            if result.get("amount") is not None:
+                update_fields["amount"] = float(result["amount"])
+            if update_fields.get("tx_type"):
+                v = update_fields["tx_type"].strip().capitalize()
+                update_fields["tx_type"] = v if v in ("Expense", "Income") else "Expense"
+            if update_fields:
+                db.update_parsed_transaction(edit_tx_id, **update_fields)
+                if not result.get("add_rule"):
+                    db.update_parsed_transaction(edit_tx_id, confirmed=1)
+            elif not update_fields and result and (result.get("add_rule") or "confirm" in text.lower() or "yes" in text.lower()):
+                db.update_parsed_transaction(edit_tx_id, confirmed=1)
+            if result.get("add_rule"):
+                merchant = update_fields.get("merchant") or tx["merchant"]
+                cat = update_fields.get("category") or tx.get("category") or ""
+                sub = update_fields.get("subcategory") or tx.get("subcategory") or ""
+                full_cat = f"{cat}/{sub}" if cat and sub else cat
+                if full_cat:
+                    db.add_transaction_rule(user_id, merchant.lower(), full_cat)
+            updated = db.get_parsed_transaction(edit_tx_id)
+            if update_fields:
+                msg_parts = []
+                for field in ("merchant", "category", "subcategory", "account", "tx_type"):
+                    val = updated.get(field) or ""
+                    if val:
+                        msg_parts.append(f"{field.capitalize()}: {val}")
+                if updated.get("amount"):
+                    msg_parts.append(f"Amount: ${updated['amount']:.2f}")
+                reply = f"✅ Updated:\n" + "\n".join(msg_parts)
+            else:
+                reply = "✅ Accepted suggestion."
+            if result.get("add_rule"):
+                reply += "\n✅ Rule saved!"
+            await update.effective_message.reply_text(reply)
             if tx:
                 rtext, rkb = _render_parse_session(tx["session_id"])
                 if rtext and user_id in _parse_msg:
@@ -2548,6 +2593,23 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         )
                     except Exception:
                         pass
+            return
+
+        if re.search(r'(?:remember|learn|add rule|note|save|record|log|this is)\s+.*?(?:is|as|→|->|:).*', text, re.IGNORECASE):
+            result = ai.parse_edit_natural(text, {"merchant":"","category":"","subcategory":"","amount":0,"account":"","tx_type":"Expense"}, _load_rulebook(user_id))
+            if result and result.get("merchant") and (result.get("category") or result.get("subcategory")):
+                merchant = result["merchant"]
+                cat = result.get("category") or ""
+                sub = result.get("subcategory") or ""
+                full_cat = f"{cat}/{sub}" if cat and sub else cat
+                db.add_transaction_rule(user_id, merchant.lower(), full_cat)
+                await update.effective_message.reply_text(
+                    f"✅ Got it! I'll remember \"{merchant}\" → {full_cat}."
+                )
+                return
+            await update.effective_message.reply_text(
+                "Couldn't understand the rule. Try: \"remember Si Si Nan Chun is Food/Eating Out\""
+            )
             return
 
         if _pending_statement.get(user_id):
@@ -3153,10 +3215,19 @@ def _extract_pdf_text(file_bytes):
         import pdfplumber
         import io
         with pdfplumber.open(io.BytesIO(bytes(file_bytes))) as pdf:
-            for page in pdf.pages:
-                page_text = page.extract_text() or ""
-                if page_text:
-                    text_parts.append(page_text)
+            for i, page in enumerate(pdf.pages):
+                page_text = page.extract_text(x_tolerance=3, y_tolerance=3) or ""
+                if len(page_text.strip()) < 50:
+                    tables = page.extract_tables()
+                    if tables:
+                        rows = []
+                        for table in tables:
+                            for row in table:
+                                cleaned = [cell.strip() if cell else "" for cell in row]
+                                rows.append("\t".join(cleaned))
+                        page_text = "\n".join(rows)
+                if page_text.strip():
+                    text_parts.append(f"--- Page {i+1} ---\n{page_text}")
     except Exception as e:
         logger.error(f"pdfplumber extraction failed: {e}")
         try:
@@ -3276,43 +3347,43 @@ def _render_parse_session(session_id):
         return "No transactions in this session.", None
     lines = ["\U0001f4c4 Parsed Statement", "\u2501" * 23]
     keyboard = []
-    for tx in txs:
-        if tx["confirmed"] == -1:
-            continue
-        is_unclear = tx["confidence"] == "low" and tx["confirmed"] != 1
-        if is_unclear:
-            icon = "\u2754"
-        elif tx["confirmed"] == 1:
-            icon = "\u2705"
-        else:
-            icon = "\u2705"
-        d = _fmt_ddmmyy(tx["date"]) if tx["date"] else "??/??"
-        if is_unclear and tx["amount"] == 0.0:
-            amt = "?"
-        else:
+
+    confirmed_txs = [t for t in txs if t["confirmed"] == 1]
+    identified_txs = [t for t in txs if t["confirmed"] != 1 and t["confidence"] != "low" and t["confirmed"] != -1]
+    unclear_txs = [t for t in txs if t["confidence"] == "low" and t["confirmed"] != 1]
+
+    if confirmed_txs:
+        lines.append(f"\n\u2705 Auto-confirmed ({len(confirmed_txs)}):")
+        for tx in confirmed_txs:
+            d = _fmt_ddmmyy(tx["date"]) if tx["date"] else "??/??"
             amt = f"${tx['amount']:.2f}"
-        tx_type = (tx.get("tx_type") or "Expense")
-        type_icon = "\U0001f4b9" if tx_type == "Income" else ""
-        lines.append(f"{icon} {d} {tx['merchant'][:28]:<28} {amt:>8} {type_icon}")
-        sub = []
-        if tx.get("account"):
-            sub.append(f"\U0001f4b3 {tx['account']}")
-        cat_str = tx.get("category") or ""
-        subcat = tx.get("subcategory") or ""
-        if cat_str:
-            if subcat:
-                sub.append(f"\u2192 {cat_str}/{subcat}")
-            else:
-                sub.append(f"\u2192 {cat_str}")
-        if tx_type == "Income":
-            sub.append("(Income)")
-        if sub:
-            lines.append(f"     {'  '.join(sub)}")
+            cat_str = tx.get("category") or ""
+            subcat = tx.get("subcategory") or ""
+            cat_display = f" → {cat_str}/{subcat}" if cat_str and subcat else (f" → {cat_str}" if cat_str else "")
+            lines.append(f"  {d} {tx['merchant'][:28]:<28} {amt:>8}{cat_display}")
+
+    if identified_txs:
+        lines.append(f"\n\U0001f50d Identified ({len(identified_txs)}):")
+        for tx in identified_txs:
+            d = _fmt_ddmmyy(tx["date"]) if tx["date"] else "??/??"
+            amt = f"${tx['amount']:.2f}"
+            cat_str = tx.get("category") or ""
+            subcat = tx.get("subcategory") or ""
+            cat_display = f" → {cat_str}/{subcat}" if cat_str and subcat else (f" → {cat_str}" if cat_str else "")
+            lines.append(f"  {d} {tx['merchant'][:28]:<28} {amt:>8}{cat_display}")
+
+    if unclear_txs:
+        lines.append(f"\n\u2754 Flags — need your input ({len(unclear_txs)}):")
+        for tx in unclear_txs:
+            amt = f"${tx['amount']:.2f}" if tx["amount"] else "?"
+            lines.append(f"  {tx['merchant'][:28]:<28} {amt:>8}")
+
     lines.append("\u2501" * 23)
     visible = [t for t in txs if t["confirmed"] != -1]
     n_conf = sum(1 for t in visible if t["confirmed"] == 1)
-    n_unclear = sum(1 for t in visible if t["confidence"] == "low" and t["confirmed"] != 1)
-    lines.append(f"\u2705 {n_conf} confirmed  \u2754 {n_unclear} unclear  /  {len(visible)} total")
+    n_identified = sum(1 for t in visible if t["confirmed"] != 1 and t["confidence"] != "low")
+    n_unclear = len(unclear_txs)
+    lines.append(f"\u2705 {n_conf} confirmed  \u2754 {n_unclear} flags  /  {len(visible)} total")
     keyboard.append([
         InlineKeyboardButton("\u2705 Confirm All", callback_data=f"parse_confirm_all_{session_id}"),
         InlineKeyboardButton("\u274c Cancel", callback_data=f"parse_cancel_{session_id}"),
@@ -3578,20 +3649,17 @@ async def handle_statement_parse(update, context, user_id, statement_text, overr
         await busy.edit_text("\U0001f50d Checking unclear items via web search...")
     unclear_txs = [t for t in db.get_parsed_transactions(session_id) if t["confidence"] == "low" and t["confirmed"] != 1 and t["merchant"]]
     identified_count = 0
-    for utx in unclear_txs[:8]:
-        try:
-            ident = ai.identify_merchant(utx["merchant"], _load_rulebook(user_id))
-            if not ident:
-                continue
+    if unclear_txs:
+        unclear_names = list(dict.fromkeys(t["merchant"] for t in unclear_txs))  # unique, preserve order
+        batch_result = ai.batch_identify_merchants(unclear_names, _load_rulebook(user_id), statement_text)
+        for ident in batch_result.get("identifications", []):
             ic = (ident.get("confidence") or "low").strip().lower()
             if ic == "low":
                 continue
-            im = (ident.get("merchant") or utx["merchant"]).strip()
+            im = (ident.get("merchant") or "").strip()
             icat = (ident.get("category") or "").strip()
             isub = (ident.get("subcategory") or "").strip()
             iacct = (ident.get("account") or "").strip()
-            if iacct:
-                iacct = _normalize_account(iacct, user_id) or iacct
             itype = (ident.get("tx_type") or "Expense").strip().capitalize()
             if itype not in ("Expense", "Income"):
                 itype = "Expense"
@@ -3599,18 +3667,19 @@ async def handle_statement_parse(update, context, user_id, statement_text, overr
                 continue
             update_fields = {"merchant": im, "category": icat, "subcategory": isub, "confidence": ic, "tx_type": itype}
             if iacct:
+                iacct = _normalize_account(iacct, user_id) or iacct
                 update_fields["account"] = iacct
-            db.update_parsed_transaction(utx["id"], **update_fields)
+            for utx in unclear_txs:
+                if utx["merchant"].lower() == ident.get("original_name", "").lower():
+                    db.update_parsed_transaction(utx["id"], **update_fields)
             db.add_transaction_rule(user_id, im, icat if not isub else f"{icat}/{isub}")
             identified_count += 1
-        except Exception as e:
-            logger.error(f"Auto-identify failed for {utx['merchant']}: {e}")
     text, keyboard = _render_parse_session(session_id)
     prefix = ""
     if auto_confirmed:
         prefix += f"\u2705 {auto_confirmed} auto-confirmed (recurring)\n"
     if identified_count:
-        prefix += f"\U0001f50d {identified_count} identified via web search\n"
+        prefix += f"\U0001f50d {identified_count} identified via AI\n"
     if invalid_cats:
         prefix += f"\u26a0\ufe0f {len(invalid_cats)} had invalid categories (flagged)\n"
     if prefix:
@@ -3874,14 +3943,35 @@ async def parse_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("parse_edit_"):
         tx_id = int(data.split("_")[2])
         _parse_edit[user_id] = tx_id
-        account_names = _get_account_names(user_id)
+        tx = db.get_parsed_transaction(tx_id)
+        rulebook = _load_rulebook(user_id)
+        suggestion = ai.batch_identify_merchants([tx["merchant"]], rulebook, tx.get("notes", ""))
+        if suggestion.get("identifications"):
+            ident = suggestion["identifications"][0]
+            sc = (ident.get("confidence") or "low").strip().lower()
+            if sc != "low":
+                desc = ident.get("description", "").strip()
+                cat = ident.get("category", "") or tx.get("category", "") or "?"
+                sub = ident.get("subcategory", "") or tx.get("subcategory", "") or ""
+                acct = ident.get("account", "") or tx.get("account", "") or "?"
+                cat_display = f"{cat}/{sub}" if cat and sub else (cat or "?")
+                hint = f"\n💡 I think this is: {ident.get('merchant', tx['merchant'])}" if ident.get('merchant') else ""
+                await query.edit_message_text(
+                    f"Edit: {tx['merchant']}{hint}\n"
+                    f"💳 {acct} → {cat_display}\n"
+                    f"📝 {desc}\n\n"
+                    "Reply with a correction, e.g.:\n"
+                    "\"it's Si Si Nan Chun, Food/Eating Out\"\n"
+                    "\"Category: Health\"\n"
+                    "\"confirm\" to accept the suggestion",
+                )
+                return
         await query.edit_message_text(
-            "Send the correction as:\n"
-            "`Category: Food` or `Subcategory: Groceries` or `Merchant: NTUC`\n"
-            "or `Amount: 50` or `Date: 12/03/26` or `Account: OCBC 365`\n"
-            "or `Type: Income` (or `Type: Expense`)\n\n"
-            f"Accounts: {', '.join(account_names)}",
-            parse_mode="Markdown",
+            f"Edit: {tx['merchant']}\n\n"
+            "Send what it should be, e.g.:\n"
+            "\"it's Si Si Nan Chun, Food/Eating Out\"\n"
+            "\"Category: Health/Health\"\n"
+            "\"Amount: 12.34\"",
         )
         return
     if data.startswith("parse_identify_"):

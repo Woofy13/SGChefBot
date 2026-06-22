@@ -1206,7 +1206,8 @@ def parse_statement(statement_text, rulebook_text):
         "# UNCLEAR: merchant1, merchant2\n"
         "# DUE_DATE: mm/dd/yyyy\n\n"
         "No <think> reasoning. Output only TSV and # comment lines.\n"
-        "Skip non-transaction lines — summaries, terms, disclaimers, page headers/footers, instructions. Extract only actual transaction rows."
+        "Skip non-transaction lines — summaries, terms, disclaimers, page headers/footers, instructions. Extract only actual transaction rows.\n"
+        "Subcategories can include: Eating Out, Groceries, Snacks, Dessert, Health, Medicine, Optical, Taxi, Shopping, Entertainment, Utilities, and others. Use the most specific subcategory that fits."
     )
     prompt = (
         f"RULEBOOK:\n{rulebook_text}\n\n"
@@ -1344,38 +1345,106 @@ def parse_bill_input(user_text):
 # --- Merchant Identification via Web Search ---
 
 
-def identify_merchant(merchant_name, rulebook_text=""):
-    if not merchant_name or not merchant_name.strip():
-        return None
-    merchant_name = merchant_name.strip()
-    search_q = f'"{merchant_name}" Singapore merchant transaction'
+def _search_merchant(merchant_name):
     snippets = None
     try:
         with DDGS(timeout=5) as ddgs:
-            results = ddgs.text(search_q, max_results=5)
+            results = ddgs.text(f'"{merchant_name}" Singapore OR Malaysia merchant', max_results=4)
             snippets = []
             for r in results:
                 snippets.append(f"Title: {r.get('title', '')}\n{r.get('body', '')}")
             snippets = "\n\n".join(snippets) if snippets else None
     except Exception:
-        logger.exception("identify_merchant web search failed")
+        logger.exception("merchant web search failed")
         snippets = None
+    return snippets or "(no results)"
 
+
+def batch_identify_merchants(merchant_names, rulebook_text, full_statement_text=""):
+    if not merchant_names:
+        return {"identifications": [], "still_unclear": []}
+    search_results = {}
+    for m in merchant_names:
+        m = m.strip()
+        if m:
+            search_results[m] = _search_merchant(m)
+    search_block = "\n\n---\n\n".join(
+        f"MERCHANT: \"{m}\"\nWeb results:\n{search_results[m]}"
+        for m in merchant_names
+    )
     system_msg = (
         "You identify unknown merchants from bank/credit card statements.\n"
-        "Given a merchant name and web search results, determine what the merchant is and categorize it.\n"
-        "Return ONLY JSON: {\"merchant\": \"cleaned proper-case name\", \"category\": \"main category\", \"subcategory\": \"subcategory or empty\", \"account\": \"one of the rulebook Account Names or empty\", \"tx_type\": \"Expense\"|\"Income\", \"confidence\": \"high\"|\"medium\"|\"low\", \"description\": \"one-line what it is\"}\n"
-        "category is the main category only (e.g. \"Food\", \"Shopping\", \"Other / Reimbursement\"). subcategory is the subcategory or empty (income categories always have empty subcategory).\n"
-        "tx_type is \"Expense\" for purchases, \"Income\" for refunds/rebates/reimbursements.\n"
-        "account must be one of the rulebook's Account Names (POSB, UOB PPV, Citi Rewards (Amaze), UOB Lady, DBS Altitude, SC SimplyCash, YouTrip, OCBC 365, MariBank) if it can be inferred from the merchant or context; otherwise empty string.\n"
-        "If the search results don't clearly identify the merchant, return {\"confidence\": \"low\", \"merchant\": \"<original>\", \"category\": \"\", \"subcategory\": \"\", \"account\": \"\", \"tx_type\": \"Expense\", \"description\": \"could not identify\"}.\n"
+        "Given merchant names, web search results, and the full statement context, identify ALL merchants.\n"
+        "Return ONLY JSON: {\"identifications\": [{\"original_name\": \"...\", \"merchant\": \"cleaned name\", \"category\": \"...\", \"subcategory\": \"...\", \"account\": \"...\", \"tx_type\": \"Expense\"|\"Income\", \"confidence\": \"high\"|\"medium\"|\"low\", \"description\": \"one-line what it is\"}], \"still_unclear\": []}\n"
+        "For confident identifications, include all fields. For truly uncertain ones, put the original_name in still_unclear.\n"
+        "category is main category (Food, Transportation, Health, Shopping, etc.).\n"
+        "subcategory can be: Eating Out, Groceries, Snacks, Dessert, Taxi, Medicine, Optical, etc.\n"
+        "tx_type is Expense for purchases.\n"
+        "Use the statement context (dates, amounts, neighboring transactions) to fill in truncated names.\n"
         "Do not include any text outside the JSON object."
     )
     prompt = (
-        f"Merchant to identify: \"{merchant_name}\"\n\n"
-        f"Rulebook categories:\n{rulebook_text[:2000] if rulebook_text else '(none)'}\n\n"
-        f"Web search results:\n{snippets if snippets else '(no results)'}\n\n"
-        "Identify this merchant and return ONLY the JSON object."
+        f"Full statement text:\n{full_statement_text[:3000]}\n\n"
+        f"---\n\n"
+        f"Rulebook:\n{rulebook_text[:2000] if rulebook_text else '(none)'}\n\n"
+        f"---\n\n"
+        f"Merchants to identify:\n{search_block}\n\n"
+        "Identify each merchant. Return ONLY the JSON object."
+    )
+    try:
+        text = _ai_call(prompt, system_msg, temperature=0.1, max_tokens=2000)
+        if not text:
+            return {"identifications": [], "still_unclear": merchant_names}
+        text = text.strip()
+        text = text.replace("```json", "").replace("```", "").strip()
+        start, end = text.find("{"), text.rfind("}")
+        if start >= 0 and end > start:
+            text = text[start:end + 1]
+        result = json.loads(text)
+        if not isinstance(result, dict):
+            return {"identifications": [], "still_unclear": merchant_names}
+        return result
+    except Exception:
+        logger.exception("batch_identify_merchants failed")
+        return {"identifications": [], "still_unclear": merchant_names}
+
+
+def identify_merchant(merchant_name, rulebook_text=""):
+    result = batch_identify_merchants([merchant_name], rulebook_text)
+    ids = result.get("identifications", [])
+    return ids[0] if ids else None
+
+
+# --- Natural Language Edit Parser ---
+
+
+def parse_edit_natural(user_message, current_tx, rulebook_text=""):
+    system_msg = (
+        "You extract structured corrections from a user's natural language response about a transaction.\n"
+        "Return ONLY JSON: {\"merchant\": \"\", \"category\": \"\", \"subcategory\": \"\", \"account\": \"\", \"tx_type\": \"\", \"amount\": null, \"notes\": \"\", \"add_rule\": false}\n"
+        "Only include fields the user explicitly changes. Leave unchanged fields as empty string or null.\n"
+        "Set add_rule=true if the user is identifying a merchant (not just correcting a typo).\n"
+        "tx_type is Expense or Income. amount should be a number or null.\n"
+        'Examples:\n'
+        '- "it\'s Si Si Nan Chun, Food/Eating Out" → {"merchant":"Si Si Nan Chun","category":"Food","subcategory":"Eating Out","add_rule":true}\n'
+        '- "yes that\'s correct" → {"add_rule":true}\n'
+        '- "amount is 12.34" → {"amount":12.34}\n'
+        '- "it\'s a taxi, Transportation/Taxi" → {"category":"Transportation","subcategory":"Taxi","add_rule":false}\n'
+        "Do not include any text outside the JSON object."
+    )
+    tx_info = (
+        f"Current transaction: merchant=\"{current_tx.get('merchant','')}\", "
+        f"amount={current_tx.get('amount',0)}, "
+        f"category=\"{current_tx.get('category','')}\", "
+        f"subcategory=\"{current_tx.get('subcategory','')}\", "
+        f"account=\"{current_tx.get('account','')}\", "
+        f"tx_type=\"{current_tx.get('tx_type','Expense')}\""
+    )
+    prompt = (
+        f"{tx_info}\n\n"
+        f"Rulebook:\n{rulebook_text[:1000] if rulebook_text else '(none)'}\n\n"
+        f'User says: "{user_message}"\n\n'
+        "Extract the corrections and return ONLY the JSON object."
     )
     try:
         text = _ai_call(prompt, system_msg, temperature=0.1, max_tokens=300)
@@ -1391,5 +1460,5 @@ def identify_merchant(merchant_name, rulebook_text=""):
             return None
         return result
     except Exception:
-        logger.exception("identify_merchant AI call failed")
+        logger.exception("parse_edit_natural failed")
         return None
