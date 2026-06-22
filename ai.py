@@ -1183,7 +1183,8 @@ def parse_statement(statement_text, rulebook_text):
         "You are a bank statement parser. Return ONLY a JSON object:\n"
         "{\"transactions\":[{\"date\":\"DD/MM/YY\",\"merchant\":\"\",\"amount\":0.0,\"category\":\"\",\"subcategory\":\"\",\"account\":\"\",\"tx_type\":\"Expense\"|\"Income\",\"confidence\":\"high\"|\"medium\"|\"low\",\"notes\":\"\"}],\"unclear_items\":[\"\"],\"due_date\":\"DD/MM/YY\"}\n"
         "Use the rulebook for categories. Low-confidence items go as strings in unclear_items.\n"
-        "Dates in DD/MM/YY. Amounts positive. No text outside the JSON. Be concise."
+        "Dates in DD/MM/YY. Amounts positive. No text outside the JSON. Be concise. "
+        "Do NOT use chain-of-thought or <think> reasoning. Output only the JSON directly."
     )
     prompt = (
         f"RULEBOOK:\n{rulebook_text}\n\n"
@@ -1193,7 +1194,7 @@ def parse_statement(statement_text, rulebook_text):
         "Extract all transactions per the rulebook. Be concise — minimize whitespace."
     )
     try:
-        text = _ai_call(prompt, system_msg, temperature=0.1, max_tokens=5000)
+        text = _ai_call(prompt, system_msg, temperature=0.1, max_tokens=20000)
         logger.info("parse_statement raw (first 500): %s", (text or "")[:500])
         if not text:
             return {"transactions": [], "unclear_items": [], "due_date": ""}
