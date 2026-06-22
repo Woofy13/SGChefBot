@@ -1178,35 +1178,56 @@ def suggest_random_item(country="", exclude=None, item_type="any"):
 # --- Bank Statement Parser ---
 
 
-def _mmddyyyy_to_ddmmyy(d):
+def _pad2(s):
+    s = s.strip()
+    return "0" + s if len(s) == 1 else s
+
+
+def _yy2(s):
+    s = s.strip()
+    if len(s) == 4:
+        return s[2:]
+    if len(s) == 1:
+        return "0" + s
+    return s
+
+
+def _clean_date(d):
+    """Parse YYYY-MM-DD, DD/MM/YY, or MM/DD/YY → DD/MM/YY."""
     if not d:
         return ""
     d = d.strip()
     parts = re.split(r'[/\-\.]', d)
-    if len(parts) >= 3:
-        mm, dd, yy = parts[0], parts[1], parts[2]
-        if len(mm) == 1:
-            mm = "0" + mm
-        if len(dd) == 1:
-            dd = "0" + dd
-        if len(yy) == 4:
-            yy = yy[2:]
-        elif len(yy) == 1:
-            yy = "0" + yy
+    if len(parts) < 3:
+        return d
+    a, b, c = _pad2(parts[0]), _pad2(parts[1]), parts[2]
+    # If YYYY-MM-DD format
+    if len(parts[0]) == 4:
+        yy = _yy2(parts[0])  # yr in parts[0]
+        mm, dd = a, b
         return f"{dd}/{mm}/{yy}"
-    return d
+    yy = _yy2(c)
+    aa, bb = int(parts[0]), int(parts[1])
+    # DD/MM/YY (day > 12, month ≤ 12) or ambiguous → treat as DD/MM/YY
+    if aa > 12:
+        return f"{a}/{b}/{yy}"
+    # MM/DD/YY (month ≤ 12, day > 12)
+    if bb > 12:
+        return f"{b}/{a}/{yy}"
+    # Both ≤ 12 — ambiguous, assume DD/MM/YY (most common globally)
+    return f"{a}/{b}/{yy}"
 
 
 def parse_statement(statement_text, rulebook_text):
     system_msg = (
         "You are a bank statement parser. Output TSV with this header:\n"
         "Date\tAccount\tCategory\tSubcategory\tNote\tAmount\tIncome/Expense\tDescription\n\n"
-        "Rules: dates mm/dd/yyyy, amounts positive, Description always blank.\n"
+        "Rules: dates in YYYY-MM-DD format (e.g. 2026-07-10), amounts positive, Description always blank.\n"
         "High/medium confidence transactions go in the TSV. Uncertain merchants go in:\n"
         "# UNCLEAR: merchant1, merchant2\n"
-        "# DUE_DATE: mm/dd/yyyy\n\n"
+        "# DUE_DATE: YYYY-MM-DD\n\n"
         "No <think> reasoning. Output only TSV and # comment lines.\n"
-        "Skip non-transaction lines — summaries, terms, disclaimers, page headers/footers, instructions. Extract only actual transaction rows.\n"
+        "Extract EVERY transaction individually — each on its own TSV row. If the same merchant appears multiple times (e.g. two Grab rides), include each as a separate row. Do not skip or consolidate any transaction.\n"
         "Subcategories can include: Eating Out, Groceries, Snacks, Dessert, Health, Medicine, Optical, Taxi, Shopping, Entertainment, Utilities, and others. Use the most specific subcategory that fits."
     )
     prompt = (
@@ -1214,7 +1235,7 @@ def parse_statement(statement_text, rulebook_text):
         f"---\n\n"
         f"STATEMENT:\n{statement_text}\n\n"
         f"---\n\n"
-        "Extract all transactions. Output TSV + # comments. Be concise."
+        "Extract all transactions. Output TSV + # comments. Each transaction on its own row."
     )
     try:
         text = _ai_call(prompt, system_msg, temperature=0.1, max_tokens=20000)
@@ -1242,7 +1263,7 @@ def parse_statement(statement_text, rulebook_text):
                             unclear_items.append(item)
                 elif line.upper().startswith("# DUE_DATE"):
                     raw = line.split(":", 1)[1].strip() if ":" in line else ""
-                    due_date = _mmddyyyy_to_ddmmyy(raw)
+                    due_date = _clean_date(raw)
                 continue
 
             parts = line.split("\t")
@@ -1279,8 +1300,8 @@ def parse_statement(statement_text, rulebook_text):
                 category = raw_cat
                 subcategory = subcategory or ""
 
-            # Convert from mm/dd/yyyy to internal dd/mm/yy
-            date_internal = _mmddyyyy_to_ddmmyy(date_raw)
+            # Normalize date to internal dd/mm/yy
+            date_internal = _clean_date(date_raw)
 
             transactions.append({
                 "date": date_internal,

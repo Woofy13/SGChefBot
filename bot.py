@@ -3345,7 +3345,7 @@ def _render_parse_session(session_id):
     txs = db.get_parsed_transactions(session_id)
     if not txs:
         return "No transactions in this session.", None
-    lines = ["\U0001f4c4 Parsed Statement", "\u2501" * 23]
+    lines = ["\U0001f4c4 Parsed Statement"]
     keyboard = []
 
     confirmed_txs = [t for t in txs if t["confirmed"] == 1]
@@ -3359,7 +3359,7 @@ def _render_parse_session(session_id):
             amt = f"${tx['amount']:.2f}"
             cat_str = tx.get("category") or ""
             subcat = tx.get("subcategory") or ""
-            cat_display = f" → {cat_str}/{subcat}" if cat_str and subcat else (f" → {cat_str}" if cat_str else "")
+            cat_display = f" \u2192 {cat_str}/{subcat}" if cat_str and subcat else (f" \u2192 {cat_str}" if cat_str else "")
             lines.append(f"  {d} {tx['merchant'][:28]:<28} {amt:>8}{cat_display}")
 
     if identified_txs:
@@ -3369,16 +3369,16 @@ def _render_parse_session(session_id):
             amt = f"${tx['amount']:.2f}"
             cat_str = tx.get("category") or ""
             subcat = tx.get("subcategory") or ""
-            cat_display = f" → {cat_str}/{subcat}" if cat_str and subcat else (f" → {cat_str}" if cat_str else "")
+            cat_display = f" \u2192 {cat_str}/{subcat}" if cat_str and subcat else (f" \u2192 {cat_str}" if cat_str else "")
             lines.append(f"  {d} {tx['merchant'][:28]:<28} {amt:>8}{cat_display}")
 
     if unclear_txs:
-        lines.append(f"\n\u2754 Flags — need your input ({len(unclear_txs)}):")
+        lines.append(f"\n\u2754 Flags \u2014 need your input ({len(unclear_txs)}):")
         for tx in unclear_txs:
+            m = re.sub(r'\s*\(.*?\)\s*', '', tx['merchant']).strip()
             amt = f"${tx['amount']:.2f}" if tx["amount"] else "?"
-            lines.append(f"  {tx['merchant'][:28]:<28} {amt:>8}")
+            lines.append(f"  {m[:28]:<28} {amt:>8}")
 
-    lines.append("\u2501" * 23)
     visible = [t for t in txs if t["confirmed"] != -1]
     n_conf = sum(1 for t in visible if t["confirmed"] == 1)
     n_identified = sum(1 for t in visible if t["confirmed"] != 1 and t["confidence"] != "low")
@@ -3404,8 +3404,9 @@ def _render_parse_session(session_id):
                 InlineKeyboardButton("Reject", callback_data=f"parse_reject_{tx['id']}"),
             ])
         elif is_unclear:
+            m_short = re.sub(r'\s*\(.*?\)\s*', '', tx['merchant']).strip()[:15]
             keyboard.append([
-                InlineKeyboardButton(f"{prefix} {tx['merchant'][:15]}", callback_data="parse_noop"),
+                InlineKeyboardButton(f"{prefix} {m_short}", callback_data="parse_noop"),
                 InlineKeyboardButton("\U0001f50d Identify", callback_data=f"parse_identify_{tx['id']}"),
                 InlineKeyboardButton("Edit", callback_data=f"parse_edit_{tx['id']}"),
                 InlineKeyboardButton("Reject", callback_data=f"parse_reject_{tx['id']}"),
