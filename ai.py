@@ -1205,7 +1205,8 @@ def parse_statement(statement_text, rulebook_text):
         "High/medium confidence transactions go in the TSV. Uncertain merchants go in:\n"
         "# UNCLEAR: merchant1, merchant2\n"
         "# DUE_DATE: mm/dd/yyyy\n\n"
-        "No <think> reasoning. Output only TSV and # comment lines."
+        "No <think> reasoning. Output only TSV and # comment lines.\n"
+        "Skip non-transaction lines — summaries, terms, disclaimers, page headers/footers, instructions. Extract only actual transaction rows."
     )
     prompt = (
         f"RULEBOOK:\n{rulebook_text}\n\n"
