@@ -1178,64 +1178,55 @@ def suggest_random_item(country="", exclude=None, item_type="any"):
 # --- Bank Statement Parser ---
 
 
-def _pad2(s):
-    s = s.strip()
-    return "0" + s if len(s) == 1 else s
-
-
-def _yy2(s):
-    s = s.strip()
-    if len(s) == 4:
-        return s[2:]
-    if len(s) == 1:
-        return "0" + s
-    return s
-
-
 def _clean_date(d):
-    """Parse YYYY-MM-DD, DD/MM/YY, or MM/DD/YY → DD/MM/YY."""
     if not d:
         return ""
     d = d.strip()
     parts = re.split(r'[/\-\.]', d)
     if len(parts) < 3:
         return d
-    a, b, c = _pad2(parts[0]), _pad2(parts[1]), parts[2]
-    # If YYYY-MM-DD format
+    # YYYY-MM-DD
     if len(parts[0]) == 4:
-        yy = _yy2(parts[0])  # yr in parts[0]
-        mm, dd = a, b
+        yy = parts[0][2:]
+        mm = parts[1].zfill(2)
+        dd = parts[2].zfill(2)
+        if len(yy) == 4:
+            yy = yy[2:]
         return f"{dd}/{mm}/{yy}"
-    yy = _yy2(c)
-    aa, bb = int(parts[0]), int(parts[1])
-    # DD/MM/YY (day > 12, month ≤ 12) or ambiguous → treat as DD/MM/YY
-    if aa > 12:
-        return f"{a}/{b}/{yy}"
-    # MM/DD/YY (month ≤ 12, day > 12)
-    if bb > 12:
-        return f"{b}/{a}/{yy}"
-    # Both ≤ 12 — ambiguous, assume DD/MM/YY (most common globally)
-    return f"{a}/{b}/{yy}"
+    # DD/MM/YY — trust this order, pad and clean
+    dd = parts[0].zfill(2)
+    mm = parts[1].zfill(2)
+    yy = parts[2]
+    if len(yy) == 4:
+        yy = yy[2:]
+    elif len(yy) == 1:
+        yy = "0" + yy
+    return f"{dd}/{mm}/{yy}"
 
 
 def parse_statement(statement_text, rulebook_text):
     system_msg = (
-        "You are a bank statement parser. Output TSV with this header:\n"
-        "Date\tAccount\tCategory\tSubcategory\tNote\tAmount\tIncome/Expense\tDescription\n\n"
-        "Rules: dates in YYYY-MM-DD format (e.g. 2026-07-10), amounts positive, Description always blank.\n"
-        "High/medium confidence transactions go in the TSV. Uncertain merchants go in:\n"
+        "You extract transactions from bank/credit card statements.\n"
+        "Output each transaction on one tab-separated line:\n"
+        "Date\tMerchant\tAmount\tCategory\n\n"
+        "Rules:\n"
+        "- Date: YYYY-MM-DD (use 15th if day unknown)\n"
+        "- Amount: positive number, no currency symbol\n"
+        "- Category: e.g. Food/Eating Out, Transportation/Taxi, Health, Shopping\n"
+        "- Merchant: full merchant name, proper case\n\n"
+        "EVERY single charge gets its own line — never consolidate or skip.\n"
+        "If same merchant appears 10 times, write 10 separate lines.\n\n"
+        "After the list, on their own line:\n"
         "# UNCLEAR: merchant1, merchant2\n"
         "# DUE_DATE: YYYY-MM-DD\n\n"
-        "No <think> reasoning. Output only TSV and # comment lines.\n"
-        "Extract EVERY transaction individually — each on its own TSV row. If the same merchant appears multiple times (e.g. two Grab rides), include each as a separate row. Do not skip or consolidate any transaction.\n"
-        "Subcategories can include: Eating Out, Groceries, Snacks, Dessert, Health, Medicine, Optical, Taxi, Shopping, Entertainment, Utilities, and others. Use the most specific subcategory that fits."
+        "No other text. No headers. No markdown."
     )
     prompt = (
         f"RULEBOOK:\n{rulebook_text}\n\n"
         f"---\n\n"
         f"STATEMENT:\n{statement_text}\n\n"
         f"---\n\n"
-        "Extract all transactions. Output TSV + # comments. Each transaction on its own row."
+        "Extract every single transaction. Each on its own tab-separated line."
     )
     try:
         text = _ai_call(prompt, system_msg, temperature=0.1, max_tokens=20000)
@@ -1243,12 +1234,11 @@ def parse_statement(statement_text, rulebook_text):
         if not text:
             return {"transactions": [], "unclear_items": [], "due_date": ""}
         text = text.strip()
-        text = text.replace("```tsv", "").replace("```", "").strip()
+        text = text.replace("```", "").strip()
 
         transactions = []
         unclear_items = []
         due_date = ""
-        header_found = False
 
         for line in text.split("\n"):
             line = line.strip()
@@ -1267,40 +1257,26 @@ def parse_statement(statement_text, rulebook_text):
                 continue
 
             parts = line.split("\t")
-            if not header_found:
-                if parts and parts[0].lower() == "date":
-                    header_found = True
+            if len(parts) < 3:
                 continue
-
-            if len(parts) < 6:
+            if parts[0].lower() in ("date", "date\tmerchant"):
                 continue
 
             date_raw = parts[0].strip()
-            account = parts[1].strip() if len(parts) > 1 else ""
-            raw_cat = parts[2].strip() if len(parts) > 2 else ""
-            subcategory = parts[3].strip() if len(parts) > 3 else ""
-            merchant = parts[4].strip() if len(parts) > 4 else ""
-
+            merchant = parts[1].strip() if len(parts) > 1 else ""
             try:
-                amount = float(parts[5].replace(",", "").strip())
+                amount = float(parts[2].replace(",", "").strip())
             except (ValueError, TypeError):
                 amount = 0.0
+            category_raw = parts[3].strip() if len(parts) > 3 else ""
 
-            tx_type = parts[6].strip() if len(parts) > 6 else "Expense"
-            if tx_type not in ("Expense", "Income"):
-                tx_type = "Expense"
+            category = category_raw
+            subcategory = ""
+            if "/" in category_raw:
+                cat_parts = category_raw.split("/", 1)
+                category = cat_parts[0].strip()
+                subcategory = cat_parts[1].strip()
 
-            if raw_cat and subcategory:
-                category = raw_cat
-            elif raw_cat and "/" in raw_cat:
-                parts_cat = raw_cat.split("/", 1)
-                category = parts_cat[0].strip()
-                subcategory = parts_cat[1].strip()
-            else:
-                category = raw_cat
-                subcategory = subcategory or ""
-
-            # Normalize date to internal dd/mm/yy
             date_internal = _clean_date(date_raw)
 
             transactions.append({
@@ -1309,13 +1285,12 @@ def parse_statement(statement_text, rulebook_text):
                 "amount": amount,
                 "category": category,
                 "subcategory": subcategory,
-                "account": account,
-                "tx_type": tx_type,
+                "account": "",
+                "tx_type": "Expense",
                 "confidence": "high",
                 "notes": merchant,
             })
 
-        # Remove unclear items that were successfully parsed
         parsed_merchants = {t["merchant"].lower() for t in transactions if t["merchant"]}
         unclear_items = [i for i in unclear_items if i.lower() not in parsed_merchants]
 
