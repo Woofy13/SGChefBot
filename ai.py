@@ -1202,7 +1202,7 @@ def parse_statement(statement_text, rulebook_text):
         "Extract all transactions per the rules above. Every transaction MUST include category, subcategory (empty for income), account, and tx_type fields. Return ONLY the JSON object."
     )
     try:
-        text = _ai_call(prompt, system_msg, temperature=0.1, max_tokens=3000)
+        text = _ai_call(prompt, system_msg, temperature=0.1, max_tokens=5000)
         if not text:
             return {"transactions": [], "unclear_items": [], "due_date": ""}
         text = text.strip()
