@@ -4487,7 +4487,7 @@ async def check_bill_reminders(context: ContextTypes.DEFAULT_TYPE):
             db.mark_monthly_notified(reminder["id"], today.strftime("%Y-%m"))
         except Exception as e:
             logger.error(f"Monthly reminder send failed: {e}")
-    # Voucher reminders: monthly (new month) + weekly (7 days before expiry)
+    # Voucher reminders: monthly (new month) + weekly (once per week, 7 days before expiry)
     today_y = today.year
     today_m = today.month
     tmrw = today.replace(day=1)
@@ -4505,19 +4505,23 @@ async def check_bill_reminders(context: ContextTypes.DEFAULT_TYPE):
                 )
             except Exception as e:
                 logger.error(f"Monthly voucher reminder failed: {e}")
-    for v in db.get_vouchers_expiring_soon(OWNER_TELEGRAM_ID, days=7):
-        try:
-            exp = date.fromisoformat(v["expiry_date"]).strftime("%-d %b %Y")
-        except Exception:
-            exp = v["expiry_date"]
-        try:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=f"\u26a0 Voucher **{v['name']}** expires {exp}! ({v['details']})",
-                parse_mode="Markdown",
-            )
-        except Exception as e:
-            logger.error(f"Weekly voucher reminder failed: {e}")
+    current_week = today.isocalendar()[1]
+    last_week = db.get_user_preference(OWNER_TELEGRAM_ID, "voucher_weekly_week")
+    if last_week is None or int(last_week) < current_week:
+        for v in db.get_vouchers_expiring_soon(OWNER_TELEGRAM_ID, days=7):
+            try:
+                exp = date.fromisoformat(v["expiry_date"]).strftime("%-d %b %Y")
+            except Exception:
+                exp = v["expiry_date"]
+            try:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"\u26a0 Voucher **{v['name']}** expires {exp}! ({v['details']})",
+                    parse_mode="Markdown",
+                )
+            except Exception as e:
+                logger.error(f"Weekly voucher reminder failed: {e}")
+        db.set_user_preference(OWNER_TELEGRAM_ID, "voucher_weekly_week", str(current_week))
 
 
 async def cancel_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
