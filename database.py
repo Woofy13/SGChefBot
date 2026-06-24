@@ -545,6 +545,17 @@ def _init_pg():
             cur.execute(idx)
         except Exception:
             pass
+    _rls_tables = [
+        "pantry", "recipes", "meal_logs", "user_goals", "user_preferences",
+        "shopping_list", "cooking_log", "household_members", "transaction_rules",
+        "parse_sessions", "parsed_transactions", "bills", "monthly_reminders",
+        "cards", "token_usage", "vouchers",
+    ]
+    for tbl in _rls_tables:
+        try:
+            cur.execute(f"ALTER TABLE {tbl} ENABLE ROW LEVEL SECURITY")
+        except Exception:
+            pass
     _commit(conn)
     _close(conn)
     # Migration: add UNIQUE for databases created without it
