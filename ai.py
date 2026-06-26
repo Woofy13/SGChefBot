@@ -593,6 +593,7 @@ def _vision_call(prompt_text, base64_image, system_msg=None, max_tokens=500):
             model=GROQ_VISION_MODEL,
             messages=msgs,
             temperature=0.3, max_tokens=max_tokens,
+            reasoning_effort="none",
         )
         _daily_count += 1
         return resp.choices[0].message.content.strip()
