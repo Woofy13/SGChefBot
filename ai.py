@@ -660,13 +660,58 @@ def analyze_meal_image(base64_image, caption=""):
     return text.strip()
 
 
-def _extract_nutrition_from_analysis(analysis_text):
+def _identify_food_items(analysis_text):
     prompt = (
-        f"Extract estimated nutrition from this meal analysis. Return ONLY JSON with keys: "
-        f"calories (int), protein_g (int), sodium_mg (int). "
-        f"Use your best estimate based on the description.\n\n{analysis_text}"
+        "List the individual food items visible in this meal description with estimated portion sizes. "
+        "Return ONLY a JSON array of strings, one per ingredient (e.g. "
+        '["2 fried eggs", "150g chicken thigh", "1 cup white rice", "2 tbsp oil"]). '
+        "Be specific about quantity and preparation method.\n\n"
+        f"{analysis_text}"
     )
-    text = _ai_call_groq(prompt, "You extract nutrition estimates from meal descriptions. Return ONLY valid JSON.")
+    text = _ai_call_groq(prompt, "You identify food items from meal descriptions. Return ONLY valid JSON.", max_tokens=400)
+    if not text:
+        return []
+    try:
+        text = text.replace("```json", "").replace("```", "").strip()
+        start, end = text.find("["), text.rfind("]")
+        if start >= 0 and end > start:
+            text = text[start:end+1]
+        return json.loads(text)
+    except Exception:
+        return []
+
+
+def _search_food_nutrition(food_items):
+    snippets = []
+    searched = set()
+    for item in food_items:
+        clean = re.sub(r'[\d.,]+', '', item).strip().lower()
+        clean = re.sub(r'\b(g|ml|cup|tbsp|tsp|oz|slice|slices|pieces|piece|serving)\b', '', clean).strip()
+        clean = re.sub(r'\s+', ' ', clean).strip()
+        if not clean or clean in searched:
+            continue
+        searched.add(clean)
+        try:
+            with DDGS(timeout=5) as ddgs:
+                results = ddgs.text(f"singapore {clean} nutrition per 100g", max_results=3)
+                for r in results:
+                    snippets.append(f"Item: {clean}\n{r.get('body', '')}")
+        except Exception:
+            continue
+    return "\n\n".join(snippets) if snippets else None
+
+
+def _estimate_meal_nutrition(analysis_text, search_results):
+    context = ""
+    if search_results:
+        context = f"\n\nWeb search results for nutritional values:\n{search_results}"
+    prompt = (
+        f"Based on the meal analysis below, estimate the nutrition for the portion described. "
+        f"Use the web search results for real nutritional values per 100g. "
+        f"Return ONLY JSON with keys: calories (int), protein_g (int), sodium_mg (int).\n\n"
+        f"{analysis_text}{context}"
+    )
+    text = _ai_call_groq(prompt, "You estimate meal nutrition using real nutritional data. Return ONLY valid JSON.", max_tokens=500)
     if not text:
         return {"calories": 0, "protein_g": 0, "sodium_mg": 0}
     try:
@@ -677,6 +722,14 @@ def _extract_nutrition_from_analysis(analysis_text):
         return json.loads(text)
     except Exception:
         return {"calories": 0, "protein_g": 0, "sodium_mg": 0}
+
+
+def estimate_nutrition_from_analysis(analysis_text):
+    if not analysis_text:
+        return {"calories": 0, "protein_g": 0, "sodium_mg": 0}
+    items = _identify_food_items(analysis_text)
+    search_results = _search_food_nutrition(items) if items else None
+    return _estimate_meal_nutrition(analysis_text, search_results)
 
 
 def scan_receipt_from_image(base64_image):

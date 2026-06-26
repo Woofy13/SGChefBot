@@ -2777,7 +2777,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         raw_caption = (update.message.caption or "").strip().lower()
         meal_types = {"breakfast", "lunch", "dinner", "snack"}
         if raw_caption in meal_types:
-            nut = ai._extract_nutrition_from_analysis(result)
+            nut = ai.estimate_nutrition_from_analysis(result)
             db.log_meal(
                 user_id,
                 raw_caption.capitalize(),
