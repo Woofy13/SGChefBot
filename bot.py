@@ -2747,23 +2747,15 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_bytes = await file.download_as_bytearray()
         b64 = base64.b64encode(file_bytes).decode("utf-8")
 
-        info = ai.recognize_food_from_image(b64)
+        caption = update.message.caption or ""
+        result = ai.analyze_meal_image(b64, caption)
 
-        if "error" in info and info.get("name") == "Unknown":
-            await msg.edit_text("Could not identify the food. Try a clearer photo or tell me what you ate.")
+        if result.get("error"):
+            await msg.edit_text(result["analysis"] or "Could not process this image. Try a clearer photo.")
             return
 
-        text = (
-            f"*{info.get('name', 'Unknown')}*\n"
-            f"_{info.get('description', '')}_\n\n"
-            f"Per 100g:\n"
-            f"Calories: {info.get('calories_per_100g', '?')} kcal\n"
-            f"Protein: {info.get('protein_g_per_100g', '?')}g\n"
-            f"Carbs: {info.get('carbs_g_per_100g', '?')}g\n"
-            f"Fat: {info.get('fat_g_per_100g', '?')}g\n"
-            f"Sodium: {info.get('sodium_mg_per_100g', '?')}mg"
-        )
-        await msg.edit_text(text, parse_mode="Markdown")
+        text = f"*~{result['estimated_calories']} kcal*\n\n{result['analysis']}"
+        await msg.edit_text(_sanitize_markdown(text), parse_mode="Markdown")
     except Exception as e:
         logger.error(f"Image analysis failed for user {user_id}: {e}")
         await msg.edit_text("Could not process this image. Try a clearer photo.")

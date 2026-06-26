@@ -579,16 +579,20 @@ def process_natural_language(user_message, pantry_items=None, recipes=None):
 
 # --- Vision ---
 
-def _vision_call(prompt_text, base64_image):
+def _vision_call(prompt_text, base64_image, system_msg=None, max_tokens=500):
     global _daily_count
     try:
+        msgs = []
+        if system_msg:
+            msgs.append({"role": "system", "content": system_msg})
+        msgs.append({"role": "user", "content": [
+            {"type": "text", "text": prompt_text},
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}},
+        ]})
         resp = groq_client.chat.completions.create(
             model=GROQ_VISION_MODEL,
-            messages=[{"role": "user", "content": [
-                {"type": "text", "text": prompt_text},
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}},
-            ]}],
-            temperature=0.3, max_tokens=500,
+            messages=msgs,
+            temperature=0.3, max_tokens=max_tokens,
         )
         _daily_count += 1
         return resp.choices[0].message.content.strip()
@@ -618,6 +622,63 @@ def recognize_food_from_image(base64_image):
         return {"error": "Could not identify food", "name": "Unknown", "description": "",
                 "calories_per_100g": 0, "protein_g_per_100g": 0,
                 "carbs_g_per_100g": 0, "fat_g_per_100g": 0, "sodium_mg_per_100g": 0}
+
+
+MEAL_ANALYSIS_SYSTEM = (
+    'You are a registered dietitian reviewing a photo of a meal. '
+    'Your job is to give the person eating it a clear, honest, and friendly nutritional snapshot — '
+    'the kind of practical advice a knowledgeable friend would give, not a clinical report.\n\n'
+    'When shown a food photo, write a flowing paragraph of typically 6–12 sentences — be concise for simple meals and more detailed for complex ones. Cover the following, '
+    'in plain everyday English:\n\n'
+    'Portion size — Is this appropriate for an average adult, or is it too large or too small? '
+    'Give a simple reference if helpful (e.g., "the rice portion is roughly double what is typically recommended").\n\n'
+    'Macronutrient balance — Comment on the protein, carbohydrate, and vegetable ratio. '
+    'Is the meal balanced, or is it heavy in one area and light in another?\n\n'
+    'Hidden concerns — Flag anything that might not be obvious at first glance: excess oil or butter, '
+    'heavy sauces, processed meats, large starch servings, or high-sodium seasonings. '
+    'Explain why each is worth noting in plain terms.\n\n'
+    'One actionable tip — Suggest a single, realistic change the person could make today: '
+    'swapping one ingredient, adjusting a portion, or adding one item. Keep it simple and doable.\n\n'
+    'Tone and style rules:\n\n'
+    'Write in flowing prose only. Do not use bullet points, numbered lists, or headers inside your response.\n'
+    'Avoid nutrition jargon. If you must use a technical term, explain it immediately in plain language.\n'
+    'Be non-judgmental and encouraging. Focus on improvement, not criticism.\n'
+    'Prioritize observations relevant to satiety, energy levels, and blood sugar stability — '
+    'these matter to the widest range of people.\n'
+    'If an ingredient or cooking method is unclear from the photo, briefly state your assumption '
+    'before commenting on it (e.g., "assuming this is fried rather than baked...").\n\n'
+    'Edge cases:\n\n'
+    'If the image does not contain food, respond only with: '
+    '"I can only analyze food photos — please share a photo of a meal or dish."\n'
+    'If the photo is too blurry or unclear to analyze confidently, respond with: '
+    '"This photo is a bit hard to make out — could you share a clearer image? '
+    'I want to make sure my analysis is accurate."\n\n'
+    'Keep the entire analysis to one paragraph. Do not pad it with generic healthy eating advice. '
+    'Every sentence should earn its place by saying something specific and useful about this meal.'
+)
+
+
+def analyze_meal_image(base64_image, caption=""):
+    context = f" The user says this is: {caption}." if caption else ""
+    text = _vision_call(
+        f'Analyze the meal in this photo.{context} '
+        'Return ONLY JSON with keys: "analysis" (the paragraph), '
+        '"estimated_calories" (approximate total for the portion shown, integer), '
+        '"items" (list of visible food items).',
+        base64_image,
+        system_msg=MEAL_ANALYSIS_SYSTEM,
+        max_tokens=5000,
+    )
+    if not text:
+        return {"error": "Could not analyze the image", "analysis": "", "estimated_calories": 0, "items": []}
+    try:
+        text = text.replace("```json", "").replace("```", "").strip()
+        start, end = text.find("{"), text.rfind("}")
+        if start >= 0 and end > start:
+            text = text[start:end+1]
+        return json.loads(text)
+    except Exception:
+        return {"error": "Could not parse analysis", "analysis": "", "estimated_calories": 0, "items": []}
 
 
 def scan_receipt_from_image(base64_image):
