@@ -825,12 +825,22 @@ def get_today_logs(user_id):
     today = date.today().isoformat()
     conn = get_connection()
     cur = _execute(conn, 
-        _q("SELECT meal_name, calories, protein_g, sodium_mg, meal_type FROM meal_logs WHERE user_id = ? AND logged_date = ? ORDER BY id"),
+        _q("SELECT id, meal_name, calories, protein_g, sodium_mg, meal_type FROM meal_logs WHERE user_id = ? AND logged_date = ? ORDER BY id"),
         (user_id, today),
     )
     rows = _fetchall(cur)
     _close(conn)
     return rows
+
+
+def delete_meal_log(user_id, log_id):
+    conn = get_connection()
+    _execute(conn,
+        _q("DELETE FROM meal_logs WHERE id = ? AND user_id = ?"),
+        (log_id, user_id),
+    )
+    _commit(conn)
+    _close(conn)
 
 
 def get_weekly_logs(user_id):

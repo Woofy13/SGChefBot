@@ -323,11 +323,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "  /shopclear                       clear the entire list\n\n"
         "*Nutrition & Tracking*\n\n"
         "  /log chicken rice, lunch         log a meal\n"
-        "  /calories                        today's nutrition totals\n"
+        "  /daily                          today's nutrition totals\n"
+        "  /remove <number>                 remove an entry from /daily\n"
         "  /nutrition chicken               lookup per 100g\n"
         "  /goal 1900 120 2300              set daily targets\n"
         "  /weekly                          weekly summary\n"
-        "  food photo                       get nutrition breakdown\n\n"
+        "  food photo                       get nutrition breakdown\n"
+        "  food photo + Breakfast/Lunch/    auto-log to /daily\n"
+        "       Dinner/Snack caption\n\n"
         "*Settings*\n\n"
         "  /equipment air fryer, oven       save your kitchen gear\n"
         "  /addequipment air fryer          add to existing gear\n"
@@ -1821,7 +1824,7 @@ async def log_meal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def calories_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def daily_tracking(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     logs = db.get_today_logs(user_id)
     goals = db.get_goals(user_id)
@@ -1841,8 +1844,8 @@ async def calories_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bar = "█" * (cal_pct // 10) + "░" * (10 - cal_pct // 10) if cal_pct <= 100 else "█" * 10
 
     lines = ["📊 *Today's Nutrition*", ""]
-    for log in logs:
-        lines.append(f"• {log['meal_name']} — {log['calories']} cal, {log['protein_g']}g protein")
+    for i, log in enumerate(logs, 1):
+        lines.append(f"{i}. {log['meal_name']} — {log['calories']} cal, {log['protein_g']}g protein")
     lines.append("")
     lines.append(f"⚡ *{total_cal} / {goals['daily_calories']} cal* ({cal_pct}%)")
     lines.append(f"`{bar}`")
@@ -1851,8 +1854,28 @@ async def calories_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if total_sodium > goals["daily_sodium"]:
         lines.append("\n⚠️ *High sodium alert!* Watch your salt intake.")
+    lines.append(f"\nUse `/remove <number>` to remove an entry.")
 
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+async def remove_meal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    args = context.args
+    if not args or not args[0].isdigit():
+        await update.message.reply_text("Usage: `/remove 1` (number from `/daily` list)", parse_mode="Markdown")
+        return
+    idx = int(args[0]) - 1
+    logs = db.get_today_logs(user_id)
+    if idx < 0 or idx >= len(logs):
+        await update.message.reply_text("Invalid number. Check `/daily` for the list.", parse_mode="Markdown")
+        return
+    removed = logs[idx]
+    db.delete_meal_log(user_id, removed["id"])
+    await update.message.reply_text(
+        f"Removed #{args[0]}: _{removed['meal_name']}_ ({removed['calories']} cal)",
+        parse_mode="Markdown",
+    )
 
 
 async def nutrition(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2460,7 +2483,7 @@ async def _handle_user_text(update, context, user_id, text):
 
     elif action == "calories":
         await msg.delete()
-        await calories_today(update, context)
+        await daily_tracking(update, context)
 
     elif action == "weekly":
         await msg.delete()
@@ -2750,12 +2773,24 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         caption = update.message.caption or ""
         result = ai.analyze_meal_image(b64, caption)
 
-        if result.get("error"):
-            await msg.edit_text(result["analysis"] or "Could not process this image. Try a clearer photo.")
+        if not result:
+            await msg.edit_text("Could not process this image. Try a clearer photo.")
             return
 
-        text = f"*~{result['estimated_calories']} kcal*\n\n{result['analysis']}"
-        await msg.edit_text(_sanitize_markdown(text), parse_mode="Markdown")
+        await msg.edit_text(_sanitize_markdown(result), parse_mode="Markdown")
+
+        raw_caption = (update.message.caption or "").strip().lower()
+        meal_types = {"breakfast", "lunch", "dinner", "snack"}
+        if raw_caption in meal_types:
+            nut = ai._extract_nutrition_from_analysis(result)
+            db.log_meal(
+                user_id,
+                raw_caption.capitalize(),
+                nut.get("calories", 0),
+                nut.get("protein_g", 0),
+                nut.get("sodium_mg", 0),
+                raw_caption,
+            )
     except Exception as e:
         logger.error(f"Image analysis failed for user {user_id}: {e}")
         await msg.edit_text("Could not process this image. Try a clearer photo.")
@@ -4705,7 +4740,8 @@ def create_app(token: str):
     app.add_handler(CommandHandler("delete", delete_recipe))
     app.add_handler(CommandHandler("canbake", canbake))
     app.add_handler(CommandHandler("log", log_meal))
-    app.add_handler(CommandHandler("calories", calories_today))
+    app.add_handler(CommandHandler("daily", daily_tracking))
+    app.add_handler(CommandHandler("remove", remove_meal))
     app.add_handler(CommandHandler("nutrition", nutrition))
     app.add_handler(CommandHandler("goal", goal))
     app.add_handler(CommandHandler("weekly", weekly))
