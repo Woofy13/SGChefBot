@@ -506,7 +506,21 @@ async def remove_pantry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = _effective_user_id(update.effective_user.id)
     args = context.args
     if not args:
-        await update.message.reply_text("Usage: `/remove milk`", parse_mode="Markdown")
+        await update.message.reply_text("Usage: `/remove milk` or `/remove 1` (from /daily)", parse_mode="Markdown")
+        return
+    first = args[0]
+    if first.isdigit():
+        idx = int(first) - 1
+        logs = db.get_today_logs(user_id)
+        if idx < 0 or idx >= len(logs):
+            await update.message.reply_text("Invalid number. Check `/daily` for the list.", parse_mode="Markdown")
+            return
+        removed = logs[idx]
+        db.delete_meal_log(user_id, removed["id"])
+        await update.message.reply_text(
+            f"Removed #{first}: _{removed['meal_name']}_ ({removed['calories']} cal)",
+            parse_mode="Markdown",
+        )
         return
     item = " ".join(args).strip().lower()
     db.remove_pantry_item(user_id, item)
@@ -1857,25 +1871,6 @@ async def daily_tracking(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines.append(f"\nUse `/remove <number>` to remove an entry.")
 
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
-
-
-async def remove_meal(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    args = context.args
-    if not args or not args[0].isdigit():
-        await update.message.reply_text("Usage: `/remove 1` (number from `/daily` list)", parse_mode="Markdown")
-        return
-    idx = int(args[0]) - 1
-    logs = db.get_today_logs(user_id)
-    if idx < 0 or idx >= len(logs):
-        await update.message.reply_text("Invalid number. Check `/daily` for the list.", parse_mode="Markdown")
-        return
-    removed = logs[idx]
-    db.delete_meal_log(user_id, removed["id"])
-    await update.message.reply_text(
-        f"Removed #{args[0]}: _{removed['meal_name']}_ ({removed['calories']} cal)",
-        parse_mode="Markdown",
-    )
 
 
 async def nutrition(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4741,7 +4736,6 @@ def create_app(token: str):
     app.add_handler(CommandHandler("canbake", canbake))
     app.add_handler(CommandHandler("log", log_meal))
     app.add_handler(CommandHandler("daily", daily_tracking))
-    app.add_handler(CommandHandler("remove", remove_meal))
     app.add_handler(CommandHandler("nutrition", nutrition))
     app.add_handler(CommandHandler("goal", goal))
     app.add_handler(CommandHandler("weekly", weekly))
