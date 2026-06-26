@@ -54,6 +54,8 @@ MAX_PHOTO_SIZE = 10 * 1024 * 1024
 
 _is_saved_recipe = TTLCache(maxsize=1000, ttl=_TWO_WEEKS)
 
+_asking_question = TTLCache(maxsize=500, ttl=3600)
+
 _receipt_items = TTLCache(maxsize=500, ttl=3600)
 
 _pref_cache = TTLCache(maxsize=1000, ttl=300)
@@ -803,6 +805,7 @@ async def _elaborate_dish(update, context, user_id, text, dish_index, pantry_ite
          InlineKeyboardButton("👨‍🍳 Cook Mode", callback_data="cook_recipe")],
         [InlineKeyboardButton("📤 Export", callback_data="export_last"),
          InlineKeyboardButton("✅ Cooked!", callback_data="cooked")],
+        [InlineKeyboardButton("❓ Ask a question", callback_data="ask_question")],
     ])
     sanitized = _sanitize_markdown(result)
     await _send_long_message(update, busy, sanitized, keyboard)
@@ -1245,6 +1248,7 @@ async def cook_done_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 [InlineKeyboardButton("👨‍🍳 Cook Mode", callback_data="cook_recipe"),
                  InlineKeyboardButton("📤 Export", callback_data="export_last"),
                  InlineKeyboardButton("✅ Cooked!", callback_data="cooked")],
+                [InlineKeyboardButton("❓ Ask a question", callback_data="ask_question")],
             ])
         else:
             keyboard = InlineKeyboardMarkup([
@@ -1252,6 +1256,7 @@ async def cook_done_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
                  InlineKeyboardButton("👨‍🍳 Cook Mode", callback_data="cook_recipe")],
                 [InlineKeyboardButton("📤 Export", callback_data="export_last"),
                  InlineKeyboardButton("✅ Cooked!", callback_data="cooked")],
+                [InlineKeyboardButton("❓ Ask a question", callback_data="ask_question")],
             ])
         sanitized = _sanitize_markdown(recipe_text)
         # Try to edit the last step message in place (no extra message)
@@ -1429,6 +1434,7 @@ async def view_recipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("👨‍🍳 Cook Mode", callback_data="cook_recipe"),
          InlineKeyboardButton("📤 Export", callback_data="export_last"),
          InlineKeyboardButton("✅ Cooked!", callback_data="cooked")],
+        [InlineKeyboardButton("❓ Ask a question", callback_data="ask_question")],
     ])
     msg = await update.message.reply_text("Loading recipe...")
     sanitized = _sanitize_markdown(text)
@@ -1495,6 +1501,7 @@ async def view_recipe_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             [InlineKeyboardButton("👨‍🍳 Cook Mode", callback_data="cook_recipe"),
              InlineKeyboardButton("📤 Export", callback_data="export_last"),
              InlineKeyboardButton("✅ Cooked!", callback_data="cooked")],
+            [InlineKeyboardButton("❓ Ask a question", callback_data="ask_question")],
         ])
         msg = await query.message.reply_text("Loading recipe...")
         sanitized = _sanitize_markdown(text)
@@ -1536,6 +1543,7 @@ async def import_recipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
          InlineKeyboardButton("👨‍🍳 Cook Mode", callback_data="cook_recipe")],
         [InlineKeyboardButton("📤 Export", callback_data="export_last"),
          InlineKeyboardButton("✅ Cooked!", callback_data="cooked")],
+        [InlineKeyboardButton("❓ Ask a question", callback_data="ask_question")],
     ])
     sanitized = _sanitize_markdown(result)
     await _send_long_message(update, msg, sanitized, keyboard)
@@ -1714,6 +1722,7 @@ async def view_cooked_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             [InlineKeyboardButton("\u2705 Cooked!", callback_data="cooked")],
             [InlineKeyboardButton("\U0001f4be Save to Recipes", callback_data="save_last"),
              InlineKeyboardButton("\U0001f519 Back", callback_data="stats_dishes")],
+            [InlineKeyboardButton("❓ Ask a question", callback_data="ask_question")],
         ])
         if len(recipe_text) <= MAX_MSG_LEN:
             await query.edit_message_text(recipe_text, parse_mode="Markdown", reply_markup=kb)
@@ -1728,6 +1737,7 @@ async def view_cooked_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("\u2705 Cooked!", callback_data="cooked")],
             [InlineKeyboardButton("\U0001f519 Back", callback_data="stats_dishes")],
+            [InlineKeyboardButton("❓ Ask a question", callback_data="ask_question")],
         ])
         await query.edit_message_text(
             f"No recipe text saved for *{entry['dish_name'].title()}*. You can still log it as cooked.",
@@ -2228,6 +2238,7 @@ async def _handle_user_text(update, context, user_id, text):
                  InlineKeyboardButton("👨‍🍳 Cook Mode", callback_data="cook_recipe")],
                 [InlineKeyboardButton("📤 Export", callback_data="export_last"),
                  InlineKeyboardButton("✅ Cooked!", callback_data="cooked")],
+                [InlineKeyboardButton("❓ Ask a question", callback_data="ask_question")],
             ])
             await _send_long_message(None, msg, sanitized, keyboard)
             return
@@ -2257,6 +2268,7 @@ async def _handle_user_text(update, context, user_id, text):
                  InlineKeyboardButton("👨‍🍳 Cook Mode", callback_data="cook_recipe")],
                 [InlineKeyboardButton("📤 Export", callback_data="export_last"),
                  InlineKeyboardButton("✅ Cooked!", callback_data="cooked")],
+                [InlineKeyboardButton("❓ Ask a question", callback_data="ask_question")],
             ])
             await _send_long_message(None, msg, sanitized, keyboard)
             return
@@ -2294,6 +2306,7 @@ async def _handle_user_text(update, context, user_id, text):
                     [InlineKeyboardButton("👨‍🍳 Cook Mode", callback_data="cook_recipe"),
                      InlineKeyboardButton("📤 Export", callback_data="export_last"),
                      InlineKeyboardButton("✅ Cooked!", callback_data="cooked")],
+                    [InlineKeyboardButton("❓ Ask a question", callback_data="ask_question")],
                 ])
                 sanitized = _sanitize_markdown(text_out)
                 await _reply_chunked(update.effective_message, sanitized, parse_mode="Markdown", reply_markup=keyboard)
@@ -2495,6 +2508,7 @@ async def _handle_user_text(update, context, user_id, text):
                 [InlineKeyboardButton("👨‍🍳 Cook Mode", callback_data="cook_recipe"),
                  InlineKeyboardButton("📤 Export", callback_data="export_last"),
                  InlineKeyboardButton("✅ Cooked!", callback_data="cooked")],
+                [InlineKeyboardButton("❓ Ask a question", callback_data="ask_question")],
             ])
             busy = await update.effective_message.reply_text("Fetching recipe...")
             sanitized = _sanitize_markdown(text)
@@ -2512,12 +2526,10 @@ async def _handle_user_text(update, context, user_id, text):
         await start(update, context)
 
     else:
-        recipe = _last_suggestion.get(user_id)
-        if recipe:
-            await msg.edit_text("Let me answer that...")
-            answer = ai.recipe_followup(recipe, text)
-            sanitized = _sanitize_markdown(answer)
-            await msg.edit_text(sanitized, parse_mode="Markdown")
+        if _last_suggestion.get(user_id):
+            await msg.edit_text("Let me think about that...")
+            answer = ai.chef_chat(text)
+            await msg.edit_text(_sanitize_markdown(answer), parse_mode="Markdown")
         else:
             await msg.edit_text(reply if reply else
                 "I can help manage your pantry, suggest recipes, track meals, and more! "
@@ -2660,6 +2672,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 await update.message.reply_text(f"Item #{idx+1} doesn't exist. There are {len(receipt_state['items'])} items.")
             return
+
+    recipe_text = _asking_question.pop(user_id, None)
+    if recipe_text is not None:
+        msg = await update.effective_message.reply_text("Let me answer that...")
+        answer = ai.recipe_followup((recipe_text or ""), text)
+        await msg.edit_text(_sanitize_markdown(answer), parse_mode="Markdown")
+        return
 
     await _handle_user_text(update, context, user_id, text)
 
@@ -4524,12 +4543,33 @@ async def check_bill_reminders(context: ContextTypes.DEFAULT_TYPE):
         db.set_user_preference(OWNER_TELEGRAM_ID, "voucher_weekly_week", str(current_week))
 
 
+async def ask_question_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    recipe_text = _last_suggestion.get(user_id, "")
+    _asking_question[user_id] = recipe_text
+    await query.message.reply_text("What's your question?")
+
+
+async def question_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    text = " ".join(context.args).strip()
+    if not text:
+        await update.message.reply_text("Usage: /question <your question>")
+        return
+    msg = await update.message.reply_text("Let me think about that...")
+    answer = ai.chef_chat(text)
+    await msg.edit_text(_sanitize_markdown(answer), parse_mode="Markdown")
+
+
 async def cancel_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     _pending_statement.pop(user_id, None)
     _parse_edit.pop(user_id, None)
     _pending_bill.pop(user_id, None)
     _pending_bill_from_parse.pop(user_id, None)
+    _asking_question.pop(user_id, None)
     await update.message.reply_text("\u274c Cancelled.")
 
 
@@ -4719,6 +4759,8 @@ def create_app(token: str):
     app.add_handler(CommandHandler("addvoucher", add_voucher_cmd))
     app.add_handler(CommandHandler("vouchers", vouchers_cmd))
     app.add_handler(CallbackQueryHandler(voucher_use_callback, pattern="^voucher_use_"))
+    app.add_handler(CommandHandler("question", question_command))
+    app.add_handler(CallbackQueryHandler(ask_question_callback, pattern="^ask_question$"))
     app.add_handler(CommandHandler("cancel", cancel_pending))
     app.add_handler(CallbackQueryHandler(parse_callback, pattern="^parse_"))
     app.add_handler(CallbackQueryHandler(bill_callback, pattern="^bill_(confirm|cancel)$"))

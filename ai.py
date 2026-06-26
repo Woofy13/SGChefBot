@@ -660,6 +660,14 @@ def recipe_followup(recipe_text, user_question):
         return "AI error"
 
 
+def chef_chat(user_message):
+    try:
+        return _ai_call(user_message, CHEF_PERSONA + "\n\n---\n\n" + SINGAPORE_NOTE, temperature=0.5, max_tokens=4000) or "I'm not sure what to say."
+    except Exception as e:
+        logger.exception("chef_chat failed")
+        return "AI error"
+
+
 # --- Ingredient Parsing ---
 
 def parse_ingredients_from_text(recipe_text):
