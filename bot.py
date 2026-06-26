@@ -4549,7 +4549,7 @@ async def ask_question_callback(update: Update, context: ContextTypes.DEFAULT_TY
     user_id = query.from_user.id
     recipe_text = _last_suggestion.get(user_id, "")
     _asking_question[user_id] = recipe_text
-    await query.message.reply_text("What's your question?")
+    await query.message.reply_text("May I know your question? (✿◠‿◠)")
 
 
 async def question_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
