@@ -771,7 +771,7 @@ def save_recipe(user_id, title, description, ingredients, instructions,
 
 def get_recipes(user_id):
     conn = get_connection()
-    cur = _execute(conn, _q("SELECT id, title, description, cuisine, protein_g, calories, saved_date FROM recipes WHERE user_id = ? ORDER BY saved_date DESC"), (user_id,))
+    cur = _execute(conn, _q("SELECT id, title, description, cuisine, protein_g, calories, saved_date FROM recipes WHERE user_id = ? ORDER BY id ASC"), (user_id,))
     rows = _fetchall(cur)
     _close(conn)
     return rows
