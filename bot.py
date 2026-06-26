@@ -835,6 +835,12 @@ async def suggest_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(
                 f"✅ Saved *{parsed['title']}* to your recipes!",
                 parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("👨‍🍳 Cook Mode", callback_data="cook_recipe"),
+                     InlineKeyboardButton("📤 Export", callback_data="export_last"),
+                     InlineKeyboardButton("✅ Cooked!", callback_data="cooked")],
+                    [InlineKeyboardButton("❓ Ask a question", callback_data="ask_question")],
+                ]),
             )
         else:
             await query.edit_message_text(
