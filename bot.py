@@ -1486,10 +1486,13 @@ async def delete_recipe_callback(update: Update, context: ContextTypes.DEFAULT_T
     recipes = db.get_recipes(user_id)
     if recipes:
         text, markup = _build_recipe_list(recipes)
-        busy = await query.message.reply_text("Refreshing list...")
-        await _send_long_message(None, busy, text, markup)
+        try:
+            await query.edit_message_text(text, parse_mode="Markdown", reply_markup=markup)
+        except Exception:
+            busy = await query.message.reply_text("Refreshing list...")
+            await _send_long_message(None, busy, text, markup)
     else:
-        await query.message.reply_text("No saved recipes. Try `/suggest` to get some!", parse_mode="Markdown")
+        await query.edit_message_text("No saved recipes. Try `/suggest` to get some!", parse_mode="Markdown")
 
 
 async def view_recipe_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
