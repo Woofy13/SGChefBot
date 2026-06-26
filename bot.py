@@ -671,7 +671,7 @@ async def _do_suggest(update, context, user_id, pantry, pref):
     prompt = f"{pref}\n{extra}".strip()
 
     target = update.effective_message
-    msg = await target.reply_text("Thinking...")
+    msg = await target.reply_text("Thinking... (ᵕ—ᴗ—)")
     menu = ai.generate_menu(pantry, prompt)
     _last_menu[user_id] = menu
     _last_preference[user_id] = pref
@@ -682,7 +682,7 @@ async def _do_suggest(update, context, user_id, pantry, pref):
 
     _menu_history[user_id] = {d["title"] for d in menu if d.get("title")}
 
-    lines = ["Here are some ideas:"]
+    lines = ["Here are some ideas ⸜(｡˃ ᵕ ˂ )⸝♡"]
     for i, dish in enumerate(menu, 1):
         lines.append(f"\n{i}. {dish.get('title', '?')}")
         lines.append(f"   {dish.get('description', '')}")
@@ -885,7 +885,7 @@ async def suggest_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if diet:
             extra += f" Diet: {diet}."
         prompt = f"{prev_pref}\n{extra}".strip()
-        await query.edit_message_text("Thinking...")
+        await query.edit_message_text("Thinking... (ᵕ—ᴗ—)")
         seen = _menu_history.get(user_id, set())
         hint = f"Absolutely do NOT suggest any of these dishes (already suggested before): {list(seen)}" if seen else ""
         menu = ai.generate_menu(pantry, prompt, diversity_hint=hint)
@@ -894,7 +894,7 @@ async def suggest_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("Could not generate suggestions. Try being more specific.")
             return
         _menu_history[user_id] = seen | {d["title"] for d in menu if d.get("title")}
-        lines = ["Here are some ideas:"]
+        lines = ["Here are some ideas ⸜(｡˃ ᵕ ˂ )⸝♡"]
         for i, dish in enumerate(menu, 1):
             lines.append(f"\n{i}. {dish.get('title', '?')}")
             lines.append(f"   {dish.get('description', '')}")
@@ -926,7 +926,7 @@ async def suggest_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         equip = prefs["equipment"]
         prev_pref = _last_preference.get(user_id, "")
         pref = f"Equipment: {equip}.\n{prev_pref}" if equip else prev_pref
-        await query.edit_message_text("Thinking...")
+        await query.edit_message_text("Thinking... (ᵕ—ᴗ—)")
         seen = _menu_history.get(user_id, set())
         hint = f"Absolutely do NOT suggest any of these dishes (already suggested before): {list(seen)}" if seen else ""
         pref_with_hint = f"{pref}\n{hint}" if hint else pref
@@ -2293,7 +2293,7 @@ async def _handle_user_text(update, context, user_id, text):
                          "suggest", "cook", "make", "remember", "i have", "my", "help"}
         first_word = t_lower.split()[0] if t_lower.split() else ""
         if is_question and first_word not in known_actions:
-            msg = await update.effective_message.reply_text("Let me answer that...")
+            msg = await update.effective_message.reply_text("Let me answer that... ദ്ദി(˵ •̀ ᴗ - ˵ ) ✧")
             answer = ai.recipe_followup(recipe, text)
             sanitized = _sanitize_markdown(answer)
             await msg.edit_text(sanitized, parse_mode="Markdown")
@@ -2346,7 +2346,7 @@ async def _handle_user_text(update, context, user_id, text):
             return
 
     # --- NL Processing ---
-    msg = await update.effective_message.reply_text("Thinking...")
+    msg = await update.effective_message.reply_text("Thinking... (ᵕ—ᴗ—)")
     if pantry is None:
         pantry = db.get_pantry_names(user_id)
     if recipes is None:
@@ -2536,7 +2536,7 @@ async def _handle_user_text(update, context, user_id, text):
 
     else:
         if _last_suggestion.get(user_id):
-            await msg.edit_text("Let me think about that...")
+            await msg.edit_text("Let me think about that... (˶˃ ᵕ ˂˶)")
             answer = ai.chef_chat(text)
             await msg.edit_text(_sanitize_markdown(answer), parse_mode="Markdown")
         else:
@@ -2684,7 +2684,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     recipe_text = _asking_question.pop(user_id, None)
     if recipe_text is not None:
-        msg = await update.effective_message.reply_text("Let me answer that...")
+        msg = await update.effective_message.reply_text("Let me answer that... ദ്ദി(˵ •̀ ᴗ - ˵ ) ✧")
         answer = ai.recipe_followup((recipe_text or ""), text)
         await msg.edit_text(_sanitize_markdown(answer), parse_mode="Markdown")
         return
@@ -4567,7 +4567,7 @@ async def question_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text:
         await update.message.reply_text("Usage: /question <your question>")
         return
-    msg = await update.message.reply_text("Let me think about that...")
+    msg = await update.message.reply_text("Let me think about that... (˶˃ ᵕ ˂˶)")
     answer = ai.chef_chat(text)
     await msg.edit_text(_sanitize_markdown(answer), parse_mode="Markdown")
 
@@ -4666,7 +4666,7 @@ async def delrule_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Update {update} caused error {context.error}")
     err = context.error
-    msg = str(err) if err else "Something went wrong."
+    msg = str(err) if err else "Something went wrong. (,,>﹏<,,)"
     friendly = None
     if "rate limit" in msg.lower() or "ai is temporarily unavailable" in msg.lower():
         friendly = msg
@@ -4677,7 +4677,7 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if friendly:
                 await update.effective_message.reply_text(friendly)
             else:
-                await update.effective_message.reply_text("Something went wrong. Try again later.")
+                await update.effective_message.reply_text("Something went wrong. Try again later. (,,>﹏<,,)")
         except Exception:
             pass
 
