@@ -985,9 +985,9 @@ def clear_shopping_list(user_id):
     _close(conn)
 
 
-def toggle_shopping_item(item_id):
+def toggle_shopping_item(user_id, item_id):
     conn = get_connection()
-    _execute(conn, _q("UPDATE shopping_list SET checked = 1 - checked WHERE id = ?"), (item_id,))
+    _execute(conn, _q("UPDATE shopping_list SET checked = 1 - checked WHERE id = ? AND user_id = ?"), (item_id, user_id))
     _commit(conn)
     _close(conn)
 
@@ -1091,9 +1091,9 @@ def get_cooking_log_entries(user_id):
     return rows
 
 
-def get_cooking_log_entry(entry_id):
+def get_cooking_log_entry(user_id, entry_id):
     conn = get_connection()
-    cur = _execute(conn, _q("SELECT id, user_id, dish_name, cooked_date, recipe_text, recipe_id FROM cooking_log WHERE id = ?"), (entry_id,))
+    cur = _execute(conn, _q("SELECT id, user_id, dish_name, cooked_date, recipe_text, recipe_id FROM cooking_log WHERE id = ? AND user_id = ?"), (entry_id, user_id))
     row = _fetchone(cur)
     _close(conn)
     return row
@@ -1175,9 +1175,9 @@ def get_transaction_rule(user_id, merchant_pattern):
     return row
 
 
-def delete_transaction_rule(rule_id):
+def delete_transaction_rule(user_id, rule_id):
     conn = get_connection()
-    _execute(conn, _q("DELETE FROM transaction_rules WHERE id = ?"), (rule_id,))
+    _execute(conn, _q("DELETE FROM transaction_rules WHERE id = ? AND user_id = ?"), (rule_id, user_id))
     _commit(conn)
     _close(conn)
 
@@ -1228,9 +1228,9 @@ def add_parsed_transaction(session_id, user_id, merchant, amount, date_str, cate
     return tx_id
 
 
-def get_parse_session(session_id):
+def get_parse_session(user_id, session_id):
     conn = get_connection()
-    cur = _execute(conn, _q("SELECT id, user_id, raw_text_hash, status, created_at FROM parse_sessions WHERE id = ?"), (session_id,))
+    cur = _execute(conn, _q("SELECT id, user_id, raw_text_hash, status, created_at FROM parse_sessions WHERE id = ? AND user_id = ?"), (session_id, user_id))
     row = _fetchone(cur)
     _close(conn)
     return row
@@ -1252,15 +1252,15 @@ def get_parsed_transactions(session_id):
     return rows
 
 
-def get_parsed_transaction(tx_id):
+def get_parsed_transaction(user_id, tx_id):
     conn = get_connection()
-    cur = _execute(conn, _q("SELECT id, session_id, user_id, merchant, amount, date, category, subcategory, account, tx_type, confidence, notes, confirmed, created_at FROM parsed_transactions WHERE id = ?"), (tx_id,))
+    cur = _execute(conn, _q("SELECT id, session_id, user_id, merchant, amount, date, category, subcategory, account, tx_type, confidence, notes, confirmed, created_at FROM parsed_transactions WHERE id = ? AND user_id = ?"), (tx_id, user_id))
     row = _fetchone(cur)
     _close(conn)
     return row
 
 
-def update_parsed_transaction(tx_id, **kwargs):
+def update_parsed_transaction(user_id, tx_id, **kwargs):
     if not kwargs:
         return
     allowed = {"merchant", "amount", "date", "category", "subcategory", "account", "tx_type", "confidence", "notes", "confirmed"}
@@ -1293,25 +1293,25 @@ def update_parsed_transaction(tx_id, **kwargs):
         values.append(v)
     if not fields:
         return
-    values.append(tx_id)
+    values.extend([tx_id, user_id])
     conn = get_connection()
-    _execute(conn, _q(f"UPDATE parsed_transactions SET {', '.join(fields)} WHERE id = ?"), values)
+    _execute(conn, _q(f"UPDATE parsed_transactions SET {', '.join(fields)} WHERE id = ? AND user_id = ?"), values)
     _commit(conn)
     _close(conn)
 
 
-def update_parse_session_status(session_id, status):
+def update_parse_session_status(user_id, session_id, status):
     status = status.strip().lower()
     conn = get_connection()
-    _execute(conn, _q("UPDATE parse_sessions SET status = ? WHERE id = ?"), (status, session_id))
+    _execute(conn, _q("UPDATE parse_sessions SET status = ? WHERE id = ? AND user_id = ?"), (status, session_id, user_id))
     _commit(conn)
     _close(conn)
 
 
-def delete_parse_session(session_id):
+def delete_parse_session(user_id, session_id):
     conn = get_connection()
-    _execute(conn, _q("DELETE FROM parsed_transactions WHERE session_id = ?"), (session_id,))
-    _execute(conn, _q("DELETE FROM parse_sessions WHERE id = ?"), (session_id,))
+    _execute(conn, _q("DELETE FROM parsed_transactions WHERE session_id = ? AND user_id = ?"), (session_id, user_id))
+    _execute(conn, _q("DELETE FROM parse_sessions WHERE id = ? AND user_id = ?"), (session_id, user_id))
     _commit(conn)
     _close(conn)
 
@@ -1346,38 +1346,38 @@ def get_bills(user_id):
     return rows
 
 
-def get_bill(bill_id):
+def get_bill(user_id, bill_id):
     conn = get_connection()
-    cur = _execute(conn, _q("SELECT id, user_id, card_name, card_last4, amount, due_date, description, paid, notified_3d, notified_today, created_at FROM bills WHERE id = ?"), (bill_id,))
+    cur = _execute(conn, _q("SELECT id, user_id, card_name, card_last4, amount, due_date, description, paid, notified_3d, notified_today, created_at FROM bills WHERE id = ? AND user_id = ?"), (bill_id, user_id))
     row = _fetchone(cur)
     _close(conn)
     return row
 
 
-def pay_bill(bill_id):
+def pay_bill(user_id, bill_id):
     conn = get_connection()
-    _execute(conn, _q("UPDATE bills SET paid = 1 WHERE id = ?"), (bill_id,))
+    _execute(conn, _q("UPDATE bills SET paid = 1 WHERE id = ? AND user_id = ?"), (bill_id, user_id))
     _commit(conn)
     _close(conn)
 
 
-def remove_bill(bill_id):
+def remove_bill(user_id, bill_id):
     conn = get_connection()
-    _execute(conn, _q("DELETE FROM bills WHERE id = ?"), (bill_id,))
+    _execute(conn, _q("DELETE FROM bills WHERE id = ? AND user_id = ?"), (bill_id, user_id))
     _commit(conn)
     _close(conn)
 
 
-def mark_bill_notified(bill_id):
+def mark_bill_notified(user_id, bill_id):
     conn = get_connection()
-    _execute(conn, _q("UPDATE bills SET notified_3d = 1 WHERE id = ?"), (bill_id,))
+    _execute(conn, _q("UPDATE bills SET notified_3d = 1 WHERE id = ? AND user_id = ?"), (bill_id, user_id))
     _commit(conn)
     _close(conn)
 
 
-def mark_bill_notified_today(bill_id):
+def mark_bill_notified_today(user_id, bill_id):
     conn = get_connection()
-    _execute(conn, _q("UPDATE bills SET notified_today = 1 WHERE id = ?"), (bill_id,))
+    _execute(conn, _q("UPDATE bills SET notified_today = 1 WHERE id = ? AND user_id = ?"), (bill_id, user_id))
     _commit(conn)
     _close(conn)
 
@@ -1614,9 +1614,9 @@ def get_active_vouchers(user_id):
     return rows
 
 
-def delete_voucher(voucher_id):
+def delete_voucher(user_id, voucher_id):
     conn = get_connection()
-    _execute(conn, _q("DELETE FROM vouchers WHERE id = ?"), (voucher_id,))
+    _execute(conn, _q("DELETE FROM vouchers WHERE id = ? AND user_id = ?"), (voucher_id, user_id))
     _commit(conn)
     _close(conn)
 

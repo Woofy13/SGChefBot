@@ -48,15 +48,6 @@ def _extract_json_array(text):
 MAX_TOKENS_CAP = 10000
 
 
-def _fix_json(text):
-    """Fix common JSON issues from AI output."""
-    text = re.sub(r',\s*}', '}', text)
-    text = re.sub(r',\s*]', ']', text)
-    text = re.sub(r'(?m)//.*$', '', text)
-    text = re.sub(r'/\*.*?\*/', '', text, flags=re.DOTALL)
-    return text
-
-
 def _ai_call(prompt, system_msg, temperature=0.5, max_tokens=600, return_usage=False):
     global _daily_count, _daily_date
 
@@ -255,6 +246,7 @@ IMPORTANT: Only put emojis in section headings. Never add emojis to ingredient l
 
 from cachetools import TTLCache
 _search_cache = TTLCache(maxsize=200, ttl=600)
+_nutrition_cache = TTLCache(maxsize=200, ttl=86400)
 
 
 def search_web(query, max_results=5, sites=None):
@@ -472,6 +464,9 @@ def parse_recipe_text(text):
 # --- Nutrition ---
 
 def get_nutrition(food_name):
+    cached = _nutrition_cache.get(food_name.lower())
+    if cached:
+        return cached
     prompt = (
         f"Estimated nutrition per 100g for {food_name}. "
         "Return ONLY JSON with keys: name, calories_per_100g (kcal), protein_g, "
@@ -486,13 +481,18 @@ def get_nutrition(food_name):
         start, end = text.find("{"), text.rfind("}")
         if start >= 0 and end > start:
             text = text[start:end+1]
-        return json.loads(text)
+        result = json.loads(text)
+        _nutrition_cache[food_name.lower()] = result
+        return result
     except Exception as e:
         logger.exception("get_nutrition failed")
         return None
 
 
 def meal_nutrition(meal_description):
+    cached = _nutrition_cache.get(meal_description.lower())
+    if cached:
+        return cached
     prompt = (
         f"Estimate total calories, protein (g), and sodium (mg) for: {meal_description}. "
         "Return ONLY JSON with keys: calories, protein_g, sodium_mg."
@@ -506,7 +506,9 @@ def meal_nutrition(meal_description):
         start, end = text.find("{"), text.rfind("}")
         if start >= 0 and end > start:
             text = text[start:end+1]
-        return json.loads(text)
+        result = json.loads(text)
+        _nutrition_cache[meal_description.lower()] = result
+        return result
     except Exception:
         logger.exception("meal_nutrition failed")
         return {"calories": 0, "protein_g": 0, "sodium_mg": 0}
@@ -580,7 +582,15 @@ def process_natural_language(user_message, pantry_items=None, recipes=None):
 # --- Vision ---
 
 def _vision_call(prompt_text, base64_image, system_msg=None, max_tokens=500):
-    global _daily_count
+    global _daily_count, _daily_date
+
+    today = date.today()
+    if today != _daily_date:
+        _daily_count = 0
+        _daily_date = today
+    if _daily_count >= DAILY_LIMIT:
+        raise RuntimeError("AI daily request limit reached (~1,500). Try again after midnight UTC.")
+
     try:
         msgs = []
         if system_msg:
@@ -600,29 +610,6 @@ def _vision_call(prompt_text, base64_image, system_msg=None, max_tokens=500):
     except Exception as e:
         logger.exception("_vision_call failed")
         return None
-
-
-def recognize_food_from_image(base64_image):
-    text = _vision_call(
-        "Identify this food. Return ONLY JSON with keys: name, description, "
-        "calories_per_100g, protein_g_per_100g, carbs_g_per_100g, "
-        "fat_g_per_100g, sodium_mg_per_100g.",
-        base64_image,
-    )
-    if not text:
-        return {"error": "Could not identify food", "name": "Unknown", "description": "",
-                "calories_per_100g": 0, "protein_g_per_100g": 0,
-                "carbs_g_per_100g": 0, "fat_g_per_100g": 0, "sodium_mg_per_100g": 0}
-    try:
-        text = text.replace("```json", "").replace("```", "").strip()
-        start, end = text.find("{"), text.rfind("}")
-        if start >= 0 and end > start:
-            text = text[start:end+1]
-        return json.loads(text)
-    except Exception:
-        return {"error": "Could not identify food", "name": "Unknown", "description": "",
-                "calories_per_100g": 0, "protein_g_per_100g": 0,
-                "carbs_g_per_100g": 0, "fat_g_per_100g": 0, "sodium_mg_per_100g": 0}
 
 
 MEAL_ANALYSIS_SYSTEM = (
@@ -855,7 +842,15 @@ def scale_recipe(recipe_text, factor, target_servings=None):
 # --- Audio Transcription ---
 
 def transcribe_audio(audio_bytes, filename="audio.ogg"):
-    global _daily_count
+    global _daily_count, _daily_date
+
+    today = date.today()
+    if today != _daily_date:
+        _daily_count = 0
+        _daily_date = today
+    if _daily_count >= DAILY_LIMIT:
+        raise RuntimeError("AI daily request limit reached (~1,500). Try again after midnight UTC.")
+
     try:
         mime = "audio/ogg"
         if filename.endswith(".mp3"):
@@ -1129,6 +1124,22 @@ def _format_jsonld_recipe(recipe):
 def import_recipe_from_url(url):
     try:
         import httpx
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            logger.warning("import_recipe_from_url: rejected scheme %s for %s", parsed.scheme, url)
+            return None
+        import ipaddress
+        import socket
+        try:
+            host = parsed.hostname
+            addr = socket.getaddrinfo(host, None)[0][4][0]
+            ip = ipaddress.ip_address(addr)
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast:
+                logger.warning("import_recipe_from_url: rejected private IP %s for %s", addr, url)
+                return None
+        except Exception:
+            pass
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -1215,13 +1226,6 @@ def parse_cook_recipe(recipe_text):
         "ingredients": ingredients,
         "steps": steps,
     }
-
-
-# --- Random Ingredient ---
-
-def suggest_random_ingredient(country="", exclude=None):
-    return suggest_random_item(country, exclude, item_type="ingredient")
-
 
 def suggest_random_item(country="", exclude=None, item_type="any"):
     if item_type == "any":
@@ -1524,17 +1528,15 @@ def _detect_statement_country(statement_text):
     if not statement_text:
         return ""
     low = statement_text.lower()
-    # Check for multi-currency/overseas card names first — these suggest non-SG spending
     overseas_cards = ["youtrip", "wise", "revolut", "instarem", "you trip"]
     has_overseas_card = any(c in low for c in overseas_cards)
     for country, hints in _COUNTRY_HINTS.items():
         for hint in hints:
-            if hint in low:
+            if re.search(r'(?<!\w)' + re.escape(hint) + r'(?!\w)', low):
                 return country
-    # If no country hint but has an overseas card, return empty (generic search)
     if has_overseas_card:
         return ""
-    return "singapore"  # default
+    return "singapore"
 
 
 def _search_merchant(merchant_name, country=""):

@@ -6,3 +6,5 @@ sgchefbot_backup.db
 *.egg-info/
 dist/
 .DS_Store
+money_manager.md
+money_manager_rules.md

@@ -1730,7 +1730,7 @@ async def view_cooked_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.answer()
     user_id = query.from_user.id
     entry_id = int(query.data.split("_")[1])
-    entry = db.get_cooking_log_entry(entry_id)
+    entry = db.get_cooking_log_entry(user_id, entry_id)
     if not entry or entry["user_id"] != user_id:
         await query.edit_message_text("Entry not found.")
         return
@@ -2572,7 +2572,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         edit_tx_id = _parse_edit.get(user_id)
         if edit_tx_id is not None:
             _parse_edit.pop(user_id, None)
-            tx = db.get_parsed_transaction(edit_tx_id)
+            tx = db.get_parsed_transaction(user_id, edit_tx_id)
             if not tx:
                 await update.effective_message.reply_text("Transaction not found.")
                 return
@@ -2593,11 +2593,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 v = update_fields["tx_type"].strip().capitalize()
                 update_fields["tx_type"] = v if v in ("Expense", "Income") else "Expense"
             if update_fields:
-                db.update_parsed_transaction(edit_tx_id, **update_fields)
+                db.update_parsed_transaction(user_id, edit_tx_id, **update_fields)
                 if not result.get("add_rule"):
-                    db.update_parsed_transaction(edit_tx_id, confirmed=1)
+                    db.update_parsed_transaction(user_id, edit_tx_id, confirmed=1)
             elif not update_fields and result and (result.get("add_rule") or "confirm" in text.lower() or "yes" in text.lower()):
-                db.update_parsed_transaction(edit_tx_id, confirmed=1)
+                db.update_parsed_transaction(user_id, edit_tx_id, confirmed=1)
             if result.get("add_rule"):
                 merchant = update_fields.get("merchant") or tx["merchant"]
                 cat = update_fields.get("category") or tx.get("category") or ""
@@ -2605,7 +2605,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 full_cat = f"{cat}/{sub}" if cat and sub else cat
                 if full_cat:
                     db.add_transaction_rule(user_id, merchant.lower(), full_cat)
-            updated = db.get_parsed_transaction(edit_tx_id)
+            updated = db.get_parsed_transaction(user_id, edit_tx_id)
             if update_fields:
                 msg_parts = []
                 for field in ("merchant", "category", "subcategory", "account", "tx_type"):
@@ -2621,7 +2621,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply += "\n✅ Rule saved!"
             await update.effective_message.reply_text(reply)
             if tx:
-                rtext, rkb = _render_parse_session(tx["session_id"])
+                rtext, rkb = _render_parse_session(user_id, tx["session_id"])
                 if rtext and user_id in _parse_msg:
                     try:
                         await context.bot.edit_message_text(
@@ -2704,7 +2704,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if recipe_text is not None:
         msg = await update.effective_message.reply_text("Let me answer that... ദ്ദി(˵ •̀ ᴗ - ˵ ) ✧")
         answer = ai.recipe_followup((recipe_text or ""), text)
-        await msg.edit_text(_sanitize_markdown(answer), parse_mode="Markdown")
+        await _send_long_message(update, msg, _sanitize_markdown(answer), None)
         return
 
     await _handle_user_text(update, context, user_id, text)
@@ -2939,7 +2939,7 @@ async def shop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         idx = int(data.split("_")[2])
         items = db.get_shopping_list(user_id)
         if 1 <= idx <= len(items):
-            db.toggle_shopping_item(items[idx - 1]["id"])
+            db.toggle_shopping_item(user_id, items[idx - 1]["id"])
         text, keyboard = _render_shopping_list(user_id)
         if text:
             await query.edit_message_text(text, parse_mode="Markdown", reply_markup=keyboard)
@@ -3388,8 +3388,8 @@ def _detect_account(text, card_name="", user_id=None):
     return ""
 
 
-def _render_parse_session(session_id):
-    session = db.get_parse_session(session_id)
+def _render_parse_session(user_id, session_id):
+    session = db.get_parse_session(user_id, session_id)
     if not session:
         return None, None
     txs = db.get_parsed_transactions(session_id)
@@ -3519,7 +3519,7 @@ def _apply_correction(user_id, tx_id, text):
     key = field_map.get(field)
     if not key:
         return False, f"Unknown field '{field}'. Try Category, Subcategory, Merchant, Amount, Date, Account, Type, or Notes."
-    tx = db.get_parsed_transaction(tx_id)
+    tx = db.get_parsed_transaction(user_id, tx_id)
     if not tx:
         return False, "Transaction not found."
     update = {key: value}
@@ -3549,7 +3549,7 @@ def _apply_correction(user_id, tx_id, text):
             update["tx_type"] = "Expense"
         else:
             return False, "Type must be 'Income' or 'Expense'."
-    db.update_parsed_transaction(tx_id, **update)
+    db.update_parsed_transaction(user_id, tx_id, **update)
     if key == "category" and tx["merchant"]:
         db.add_transaction_rule(user_id, tx["merchant"], value)
         return True, "Noted! I'll remember that for next time."
@@ -3680,7 +3680,7 @@ async def handle_statement_parse(update, context, user_id, statement_text, overr
                 tx_type=tx_type,
             )
             if auto_confirm:
-                db.update_parsed_transaction(tx_id, confirmed=1)
+                db.update_parsed_transaction(user_id, tx_id, confirmed=1)
                 auto_confirmed += 1
             seen_merchants.add(merchant)
         except (ValueError, TypeError):
@@ -3722,10 +3722,10 @@ async def handle_statement_parse(update, context, user_id, statement_text, overr
                 update_fields["account"] = iacct
             for utx in unclear_txs:
                 if utx["merchant"].lower() == ident.get("original_name", "").lower():
-                    db.update_parsed_transaction(utx["id"], **update_fields)
+                    db.update_parsed_transaction(user_id, utx["id"], **update_fields)
             db.add_transaction_rule(user_id, im, icat if not isub else f"{icat}/{isub}")
             identified_count += 1
-    text, keyboard = _render_parse_session(session_id)
+    text, keyboard = _render_parse_session(user_id, session_id)
     prefix = ""
     if auto_confirmed:
         prefix += f"\u2705 {auto_confirmed} auto-confirmed (recurring)\n"
@@ -3917,13 +3917,13 @@ async def parse_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if data.startswith("parse_show_"):
         sid = int(data.split("_")[2])
-        text, kb = _render_parse_session(sid)
+        text, kb = _render_parse_session(user_id, sid)
         if text:
             await query.edit_message_text(text, reply_markup=kb)
         return
     if data.startswith("parse_confirm_all_"):
         sid = int(data.split("_")[3])
-        session = db.get_parse_session(sid)
+        session = db.get_parse_session(user_id, sid)
         if not session:
             await query.edit_message_text("Session not found.")
             return
@@ -3933,9 +3933,9 @@ async def parse_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 continue
             if tx["confidence"] == "low":
                 continue
-            db.update_parsed_transaction(tx["id"], confirmed=1)
+            db.update_parsed_transaction(user_id, tx["id"], confirmed=1)
         tsv = _generate_tsv(sid)
-        db.update_parse_session_status(sid, "confirmed")
+        db.update_parse_session_status(user_id, sid, "confirmed")
         n = sum(1 for t in txs if t["confirmed"] == 1 or (t["confirmed"] != -1 and t["confidence"] != "low"))
         with tempfile.NamedTemporaryFile(mode="w", suffix=".tsv", delete=False, encoding="utf-8") as f:
             f.write(tsv)
@@ -3959,42 +3959,42 @@ async def parse_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if data.startswith("parse_cancel_"):
         sid = int(data.split("_")[2])
-        db.update_parse_session_status(sid, "cancelled")
-        db.delete_parse_session(sid)
+        db.update_parse_session_status(user_id, sid, "cancelled")
+        db.delete_parse_session(user_id, sid)
         _parse_msg.pop(user_id, None)
         await query.edit_message_text("\u274c Parse session cancelled.")
         return
     if data.startswith("parse_retry_"):
         sid = int(data.split("_")[2])
-        db.update_parse_session_status(sid, "cancelled")
-        db.delete_parse_session(sid)
+        db.update_parse_session_status(user_id, sid, "cancelled")
+        db.delete_parse_session(user_id, sid)
         _parse_statement[user_id] = True
         _parse_msg.pop(user_id, None)
         await query.edit_message_text("\U0001f501 Session cleared. Send the statement text again (paste or upload a file).")
         return
     if data.startswith("parse_confirm_"):
         tx_id = int(data.split("_")[2])
-        db.update_parsed_transaction(tx_id, confirmed=1)
-        tx = db.get_parsed_transaction(tx_id)
+        db.update_parsed_transaction(user_id, tx_id, confirmed=1)
+        tx = db.get_parsed_transaction(user_id, tx_id)
         if tx:
-            text, kb = _render_parse_session(tx["session_id"])
+            text, kb = _render_parse_session(user_id, tx["session_id"])
             if text:
                 await query.edit_message_text(text, reply_markup=kb)
         return
     if data.startswith("parse_reject_"):
         tx_id = int(data.split("_")[2])
-        tx = db.get_parsed_transaction(tx_id)
+        tx = db.get_parsed_transaction(user_id, tx_id)
         if not tx:
             return
-        db.update_parsed_transaction(tx_id, confirmed=-1)
-        text, kb = _render_parse_session(tx["session_id"])
+        db.update_parsed_transaction(user_id, tx_id, confirmed=-1)
+        text, kb = _render_parse_session(user_id, tx["session_id"])
         if text:
             await query.edit_message_text(text, reply_markup=kb)
         return
     if data.startswith("parse_edit_"):
         tx_id = int(data.split("_")[2])
         _parse_edit[user_id] = tx_id
-        tx = db.get_parsed_transaction(tx_id)
+        tx = db.get_parsed_transaction(user_id, tx_id)
         rulebook = _load_rulebook(user_id)
         suggestion = ai.batch_identify_merchants([tx["merchant"]], rulebook, tx.get("notes", ""))
         if suggestion.get("identifications"):
@@ -4027,7 +4027,7 @@ async def parse_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if data.startswith("parse_identify_"):
         tx_id = int(data.split("_")[2])
-        tx = db.get_parsed_transaction(tx_id)
+        tx = db.get_parsed_transaction(user_id, tx_id)
         if not tx:
             await query.answer("Transaction not found.", show_alert=True)
             return
@@ -4052,7 +4052,7 @@ async def parse_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             update_fields = {"merchant": new_merchant, "category": new_category, "subcategory": new_subcategory, "tx_type": new_tx_type, "confidence": conf}
             if new_account:
                 update_fields["account"] = new_account
-            db.update_parsed_transaction(tx_id, **update_fields)
+            db.update_parsed_transaction(user_id, tx_id, **update_fields)
             db.add_transaction_rule(user_id, new_merchant, new_category)
             note_line = f"\U0001f50d Identified: {description}\n" if description else ""
             acct_line = f"\nAccount: {new_account}" if new_account else ""
@@ -4230,14 +4230,14 @@ async def pay_bill_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Usage: `/pay <bill_id>`", parse_mode="Markdown")
         return
     bill_id = int(args[0])
-    bill = db.get_bill(bill_id)
+    bill = db.get_bill(user_id, bill_id)
     if not bill or bill["user_id"] != user_id:
         await update.message.reply_text("Bill not found.")
         return
     if bill["paid"]:
         await update.message.reply_text("That bill is already paid.")
         return
-    db.pay_bill(bill_id)
+    db.pay_bill(user_id, bill_id)
     try:
         due = date.fromisoformat(bill["due_date"]).strftime("%b %-d")
     except Exception:
@@ -4255,11 +4255,11 @@ async def remove_bill_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Usage: `/removebill <bill_id>`", parse_mode="Markdown")
         return
     bill_id = int(args[0])
-    bill = db.get_bill(bill_id)
+    bill = db.get_bill(user_id, bill_id)
     if not bill or bill["user_id"] != user_id:
         await update.message.reply_text("Bill not found.")
         return
-    db.remove_bill(bill_id)
+    db.remove_bill(user_id, bill_id)
     await update.message.reply_text(f"\U0001f5d1 Removed bill #{bill_id}: {bill['card_name'].upper()} (${bill['amount']:.2f})")
 
 
@@ -4353,7 +4353,7 @@ async def voucher_use_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     vid = int(query.data.split("_")[2])
     v = db.get_active_vouchers(user_id)
     v = next((x for x in v if x["id"] == vid), None)
-    db.delete_voucher(vid)
+    db.delete_voucher(user_id, vid)
     remaining = db.get_active_vouchers(user_id)
     if not remaining:
         await query.edit_message_text(f"\u2705 Marked **{v['name']}** as used. No active vouchers remaining.", parse_mode="Markdown")
@@ -4407,11 +4407,11 @@ async def bill_pay_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     if data.startswith("billpay_"):
         bill_id = int(data.split("_")[1])
-        bill = db.get_bill(bill_id)
+        bill = db.get_bill(user_id, bill_id)
         if not bill or bill["user_id"] != user_id:
             await query.edit_message_text("Bill not found.")
             return
-        db.pay_bill(bill_id)
+        db.pay_bill(user_id, bill_id)
         try:
             due = date.fromisoformat(bill["due_date"]).strftime("%b %-d")
         except Exception:
@@ -4428,16 +4428,16 @@ async def bill_pay_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if data.startswith("billdue_yes_"):
         bill_id = int(data.split("_")[2])
-        bill = db.get_bill(bill_id)
+        bill = db.get_bill(user_id, bill_id)
         if not bill or bill["user_id"] != user_id:
             await query.edit_message_text("Bill not found.")
             return
-        db.pay_bill(bill_id)
+        db.pay_bill(user_id, bill_id)
         await query.edit_message_text(f"\u2705 Marked as paid: {bill['card_name'].upper()} ${bill['amount']:.2f}")
         return
     if data.startswith("billdue_no_"):
         bill_id = int(data.split("_")[2])
-        bill = db.get_bill(bill_id)
+        bill = db.get_bill(user_id, bill_id)
         if not bill or bill["user_id"] != user_id:
             await query.edit_message_text("Bill not found.")
             return
@@ -4515,7 +4515,7 @@ async def check_bill_reminders(context: ContextTypes.DEFAULT_TYPE):
                 text=f"\U0001f514 Is {bill['card_name'].upper()}{last4_str} - ${bill['amount']:.2f} paid?",
                 reply_markup=kb,
             )
-            db.mark_bill_notified_today(bill["id"])
+            db.mark_bill_notified_today(OWNER_TELEGRAM_ID, bill["id"])
         except Exception as e:
             logger.error(f"Bill due-today notification failed: {e}")
     for bill in db.get_bills_due_soon(OWNER_TELEGRAM_ID, days=3):
@@ -4528,7 +4528,7 @@ async def check_bill_reminders(context: ContextTypes.DEFAULT_TYPE):
                 chat_id=chat_id,
                 text=f"\U0001f514 Bill reminder: {bill['card_name'].upper()} ${bill['amount']:.2f} due {due}",
             )
-            db.mark_bill_notified(bill["id"])
+            db.mark_bill_notified(OWNER_TELEGRAM_ID, bill["id"])
         except Exception as e:
             logger.error(f"Bill reminder send failed: {e}")
     for reminder in db.get_monthly_reminders_due(OWNER_TELEGRAM_ID, today.day):
@@ -4591,7 +4591,7 @@ async def question_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     msg = await update.message.reply_text("Let me think about that... (˶˃ ᵕ ˂˶)")
     answer = ai.chef_chat(text)
-    await msg.edit_text(_sanitize_markdown(answer), parse_mode="Markdown")
+    await _send_long_message(update, msg, _sanitize_markdown(answer), None)
 
 
 async def cancel_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4666,7 +4666,7 @@ async def delrule_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if data.startswith("delrule_"):
         rule_id = int(data.split("_")[1])
-        db.delete_transaction_rule(rule_id)
+        db.delete_transaction_rule(user_id, rule_id)
         rules = db.get_transaction_rules(user_id)
         if not rules:
             await query.edit_message_text("\u2705 Rule deleted. No rules left.")
@@ -4791,6 +4791,7 @@ def create_app(token: str):
     app.add_handler(CommandHandler("vouchers", vouchers_cmd))
     app.add_handler(CallbackQueryHandler(voucher_use_callback, pattern="^voucher_use_"))
     app.add_handler(CommandHandler("question", question_command))
+    app.add_handler(CommandHandler("q", question_command))
     app.add_handler(CallbackQueryHandler(ask_question_callback, pattern="^ask_question$"))
     app.add_handler(CommandHandler("cancel", cancel_pending))
     app.add_handler(CallbackQueryHandler(parse_callback, pattern="^parse_"))
