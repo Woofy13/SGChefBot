@@ -654,8 +654,9 @@ async def improvise(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pantry = db.get_pantry_names(user_id)
     pref = " ".join(context.args) if context.args else ""
 
+    equip = db.get_user_preference(user_id, "equipment") or ""
     msg = await update.message.reply_text("♻️ Finding recipes for your expiring items...")
-    menu = ai.generate_improvise_menu(expiring_names, pantry, pref)
+    menu = ai.generate_improvise_menu(expiring_names, pantry, pref, equipment=equip)
     _last_menu[user_id] = menu
     _last_preference[user_id] = pref
 
@@ -947,13 +948,13 @@ async def suggest_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         seen = _menu_history.get(user_id, set())
         hint = f"Absolutely do NOT suggest any of these dishes (already suggested before): {list(seen)}" if seen else ""
         pref_with_hint = f"{pref}\n{hint}" if hint else pref
-        menu = ai.suggest_recipe(pantry, pref_with_hint)
+        menu = ai.suggest_recipe(pantry, pref_with_hint, equipment=equip)
         _last_menu[user_id] = menu
         if not menu:
             await query.edit_message_text("Couldn't find recipes for your pantry. Try adding more items.")
             return
         _menu_history[user_id] = seen | {d["title"] for d in menu if d.get("title")}
-        lines = ["From your pantry:"]
+        lines = ["Here are some ideas ⸜(｡˃ ᵕ ˂ )⸝♡"]
         for i, dish in enumerate(menu, 1):
             lines.append(f"\n{i}. {dish.get('title', '?')}")
             lines.append(f"   {dish.get('description', '')}")
@@ -1783,8 +1784,7 @@ async def canbake(update: Update, context: ContextTypes.DEFAULT_TYPE):
     prefs = _get_prefs(user_id)
     equip = prefs["equipment"]
     pref = f"Equipment: {equip}.\n" if equip else ""
-    pref += "Suggest recipes I can cook RIGHT NOW using ONLY ingredients from this list plus common staples."
-    menu = ai.suggest_recipe(pantry, pref)
+    menu = ai.suggest_recipe(pantry, pref, equipment=equip)
     _last_menu[user_id] = menu
     _last_preference[user_id] = pref
 
@@ -1794,7 +1794,7 @@ async def canbake(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     _menu_history[user_id] = {d["title"] for d in menu if d.get("title")}
 
-    lines = ["From your pantry:"]
+    lines = ["Here are some ideas ⸜(｡˃ ᵕ ˂ )⸝♡"]
     for i, dish in enumerate(menu, 1):
         lines.append(f"\n{i}. {dish.get('title', '?')}")
         lines.append(f"   {dish.get('description', '')}")
@@ -2253,8 +2253,10 @@ async def _handle_user_text(update, context, user_id, text):
         # Detect substitution intent: swap/sub/replace/change/substitute + any ingredients
         sub_keywords = re.search(r"\b(swap|sub(?:stitute)?\b|replace|change|instead of|in place of)\b", t, re.I)
         if sub_keywords and len(t.split()) <= 20:
+            pantry = db.get_pantry_names(user_id) or []
+            equip = db.get_user_preference(user_id, "equipment") or ""
             msg = await update.effective_message.reply_text("Applying substitution...")
-            result = ai.substitute_ingredient(recipe, text)
+            result = ai.substitute_ingredient(recipe, text, pantry_items=pantry, equipment=equip)
             _last_suggestion[user_id] = result
             _is_saved_recipe[user_id] = False
             mid = result.replace("**", "").replace("*", "").strip()
@@ -2283,8 +2285,10 @@ async def _handle_user_text(update, context, user_id, text):
                     current_servings = int(sv_match.group(1))
                 target = int(scale_match.group(1))
                 factor = target / current_servings
+            pantry = db.get_pantry_names(user_id) or []
+            equip = db.get_user_preference(user_id, "equipment") or ""
             msg = await update.effective_message.reply_text(f"Scaling recipe by {factor}x...")
-            result = ai.scale_recipe(recipe, factor)
+            result = ai.scale_recipe(recipe, factor, pantry_items=pantry, equipment=equip)
             _last_suggestion[user_id] = result
             _is_saved_recipe[user_id] = False
             mid = result.replace("**", "").replace("*", "").strip()
@@ -2311,8 +2315,10 @@ async def _handle_user_text(update, context, user_id, text):
                          "suggest", "cook", "make", "remember", "i have", "my", "help"}
         first_word = t_lower.split()[0] if t_lower.split() else ""
         if is_question and first_word not in known_actions:
+            pantry = db.get_pantry_names(user_id) or []
+            equip = db.get_user_preference(user_id, "equipment") or ""
             msg = await update.effective_message.reply_text("Let me answer that... ദ്ദി(˵ •̀ ᴗ - ˵ ) ✧")
-            answer = ai.recipe_followup(recipe, text)
+            answer = ai.recipe_followup(recipe, text, pantry_items=pantry, equipment=equip)
             sanitized = _sanitize_markdown(answer)
             await msg.edit_text(sanitized, parse_mode="Markdown")
             return
@@ -2554,8 +2560,10 @@ async def _handle_user_text(update, context, user_id, text):
 
     else:
         if _last_suggestion.get(user_id):
+            pantry = db.get_pantry_names(user_id) or []
+            equip = db.get_user_preference(user_id, "equipment") or ""
             await msg.edit_text("Let me think about that... (˶˃ ᵕ ˂˶)")
-            answer = ai.chef_chat(text)
+            answer = ai.chef_chat(text, pantry_items=pantry, equipment=equip)
             await msg.edit_text(_sanitize_markdown(answer), parse_mode="Markdown")
         else:
             await msg.edit_text(reply if reply else
@@ -2702,8 +2710,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     recipe_text = _asking_question.pop(user_id, None)
     if recipe_text is not None:
+        eff_id = _effective_user_id(user_id)
+        pantry = db.get_pantry_names(eff_id) or []
+        equip = db.get_user_preference(user_id, "equipment") or ""
         msg = await update.effective_message.reply_text("Let me answer that... ദ്ദി(˵ •̀ ᴗ - ˵ ) ✧")
-        answer = ai.recipe_followup((recipe_text or ""), text)
+        answer = ai.recipe_followup((recipe_text or ""), text, pantry_items=pantry, equipment=equip)
         await _send_long_message(update, msg, _sanitize_markdown(answer), None)
         return
 
@@ -4589,8 +4600,11 @@ async def question_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text:
         await update.message.reply_text("Usage: /question <your question>")
         return
+    eff_id = _effective_user_id(user_id)
+    pantry = db.get_pantry_names(eff_id) or []
+    equip = db.get_user_preference(user_id, "equipment") or ""
     msg = await update.message.reply_text("Let me think about that... (˶˃ ᵕ ˂˶)")
-    answer = ai.chef_chat(text)
+    answer = ai.chef_chat(text, pantry_items=pantry, equipment=equip)
     await _send_long_message(update, msg, _sanitize_markdown(answer), None)
 
 

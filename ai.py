@@ -294,7 +294,7 @@ def generate_menu(pantry_items, preferences="", diversity_hint=""):
 
     prompt = (
         f"User request: {preferences}\n"
-        f"Pantry (just for reference, don't feel forced to use these): {items_str}\n"
+        f"Pantry (just for reference): {items_str}\n"
         f"Common staples (always available): {COMMON_STAPLES}\n"
     )
     if web:
@@ -308,8 +308,8 @@ def generate_menu(pantry_items, preferences="", diversity_hint=""):
     prompt += (
         f"\n{diversity_hint}\n"
         "Suggest exactly 5 dishes based on the request and web references. "
-        "The pantry list is just FYI — you can suggest ANY dish the user might enjoy. "
-        "Feel free to ignore the pantry entirely. "
+        "Feel free to suggest ANY dish — you're not limited to the pantry. "
+        "Reference what the user already has where relevant (e.g. 'you have X in your pantry'). "
         "Only suggest real, well-known dishes. "
         f"{bias} "
         "Return ONLY a JSON array of objects with keys: title (str), description (max 8 words, one line), search_query (short search for this dish). "
@@ -334,7 +334,7 @@ def elaborate_recipe(search_query, pantry_items=None, preferences=""):
     prompt = (
         f"Dish: {search_query}\n"
         f"Equipment: {equip}\n"
-        f"Pantry (just for reference, don't feel forced to use these): {', '.join(pantry_items) if pantry_items else ''}\n"
+        f"Pantry (for reference — you can suggest any ingredients): {', '.join(pantry_items) if pantry_items else ''}\n"
         f"Common staples (always available): {COMMON_STAPLES}\n"
     )
     if web:
@@ -343,8 +343,7 @@ def elaborate_recipe(search_query, pantry_items=None, preferences=""):
         f"\nWrite a FULL detailed recipe for this dish following this format:\n{DETAILED_FORMAT}\n\n"
         "Use metric measurements. Include estimated protein(g), calories, and sodium(mg). "
         "Make it comprehensive but practical. Use emojis appropriately.\n"
-        "The pantry list is just FYI — you can suggest ANY ingredients needed for the dish. "
-        "You can optionally incorporate up to about 50% of pantry items if they fit, but don't force it. "
+        "Reference the user's pantry/equipment where relevant (e.g. 'you already have X' or 'you could use your Y'). "
         "IMPORTANT: Start with the dish name as a bold heading with an emoji, like: **Dish Name Here**."
     )
 
@@ -367,30 +366,29 @@ def generate_recipe_by_name(recipe_name, preferences=""):
         return None
 
 
-def suggest_recipe(pantry_items, preferences=""):
-    """Suggest dishes from pantry + staples, returns JSON array or None."""
+def suggest_recipe(pantry_items, preferences="", equipment=None):
+    """Suggest dishes, using pantry/equipment as reference, returns JSON array or None."""
     items_str = ", ".join(pantry_items) if pantry_items else "nothing specific"
+    equip_str = f"\nKitchen equipment available: {equipment}" if equipment else ""
     search_query = preferences
-    # Strip metadata lines first (before word removal to avoid fragments)
     search_query = re.sub(r'(?im)^(Equipment|Diet):.*$', '', search_query)
     search_query = re.sub(r'\n+', '\n', search_query).strip()
-    # Remove command words (with word boundaries to avoid partial matches like 'recipes' -> 's')
     search_query = re.sub(r"(?i)\b(?:suggest|recipe|make|cook)\b\s*|\b(?:i want|can i|give me|i can|what can)\b\s*", "", search_query).strip()
     web = search_web(search_query or items_str, 3, ALL_SITES)
 
     prompt = (
-        f"Pantry has: {items_str}.\nCommon staples: {COMMON_STAPLES}.\n"
+        f"User's pantry has: {items_str}. Common staples (always available): {COMMON_STAPLES}.{equip_str}\n"
         f"User request: {preferences}\n"
     )
     if web:
         prompt += f"\nWeb references:\n{web}\n"
     prompt += (
-        "\nSuggest exactly 5 dishes the user can cook RIGHT NOW using ONLY the pantry ingredients "
-        "plus common staples. If the dish needs an ingredient not in the pantry, mark it with [BUY] "
-        "in the description.\n"
-        "Return ONLY a JSON array of objects with keys: title (str), description (max 8 words, one line, mark needed items [BUY]), "
+        "\nSuggest exactly 5 dishes. You are NOT limited to pantry ingredients — suggest any dish that fits the user's request. "
+        "Reference the pantry/equipment where relevant (e.g. 'you already have X' or 'you could use your Y for this'). "
+        "If the dish needs an ingredient not in the pantry, mention it naturally.\n"
+        "Return ONLY a JSON array of objects with keys: title (str), description (max 8 words, one line), "
         "search_query (short search for this dish).\n"
-        'Example: [{"title":"Chicken Soup","description":"Hearty soup [BUY:chicken]","search_query":"chicken soup recipe"}]'
+        'Example: [{"title":"Chicken Soup","description":"Hearty soup with chicken and vegetables","search_query":"chicken soup recipe"}]'
     )
 
     try:
@@ -745,13 +743,21 @@ def scan_receipt_from_image(base64_image):
 
 # --- Recipe Follow-up ---
 
-def recipe_followup(recipe_text, user_question):
+def recipe_followup(recipe_text, user_question, pantry_items=None, equipment=None):
+    context = []
+    if pantry_items:
+        context.append(f"Available pantry: {', '.join(pantry_items)}")
+    if equipment:
+        context.append(f"Available equipment: {equipment}")
+    ctx_str = "\n".join(context)
     prompt = (
         f"Here is the current recipe:\n{recipe_text}\n\n"
         f"The user asks: {user_question}\n\n"
         "Answer the user's question based on this recipe. Be helpful and specific. "
         "Reference the recipe details in your answer. Keep it concise."
     )
+    if ctx_str:
+        prompt += f"\n\n---\n\n{ctx_str}\n\nRelate your answer to what the user already has."
     try:
         return _ai_call(prompt, CHEF_PERSONA + "\n\n---\n\nAnswer the user's question about the current recipe. Be helpful and specific.", temperature=0.5, max_tokens=4000) or "AI error"
     except Exception as e:
@@ -759,9 +765,18 @@ def recipe_followup(recipe_text, user_question):
         return "AI error"
 
 
-def chef_chat(user_message):
+def chef_chat(user_message, pantry_items=None, equipment=None):
+    context = []
+    if pantry_items:
+        context.append(f"The user has these ingredients in their pantry: {', '.join(pantry_items)}")
+    if equipment:
+        context.append(f"The user has this kitchen equipment available: {equipment}")
+    ctx_str = "\n".join(context)
+    system = CHEF_PERSONA + "\n\n---\n\n" + SINGAPORE_NOTE
+    if ctx_str:
+        system += f"\n\n---\n\n{ctx_str}\n\nWhen answering, reference what the user already has. Suggest ways to use their available ingredients and equipment."
     try:
-        return _ai_call(user_message, CHEF_PERSONA + "\n\n---\n\n" + SINGAPORE_NOTE, temperature=0.5, max_tokens=4000) or "I'm not sure what to say."
+        return _ai_call(user_message, system, temperature=0.5, max_tokens=4000) or "I'm not sure what to say."
     except Exception as e:
         logger.exception("chef_chat failed")
         return "AI error"
@@ -806,14 +821,23 @@ def generate_shopping_list(recipe_title, missing_ingredients):
 
 # --- Substitution ---
 
-def substitute_ingredient(recipe_text, substitution_text):
+def substitute_ingredient(recipe_text, substitution_text, pantry_items=None, equipment=None):
+    context = []
+    if pantry_items:
+        context.append(f"Available pantry: {', '.join(pantry_items)}")
+    if equipment:
+        context.append(f"Available equipment: {equipment}")
+    ctx_str = "\n".join(context)
     prompt = (
         f"Here is the current recipe:\n{recipe_text}\n\n"
         f"The user asks: {substitution_text}\n\n"
         "Answer concisely whether the substitution works, what differences it will make "
         "(taste, texture, cook time), and any adjustments needed. "
+        "Reference what the user already has in their pantry where relevant. "
         "Do NOT reprint the full recipe. Just answer the question."
     )
+    if ctx_str:
+        prompt += f"\n\n---\n\n{ctx_str}"
     try:
         return _ai_call(prompt, CHEF_PERSONA + "\n\n---\n\nAnswer concisely whether the substitution works. Do NOT reprint the recipe.", temperature=0.5, max_tokens=4000) or "AI error"
     except Exception as e:
@@ -823,7 +847,13 @@ def substitute_ingredient(recipe_text, substitution_text):
 
 # --- Scale ---
 
-def scale_recipe(recipe_text, factor, target_servings=None):
+def scale_recipe(recipe_text, factor, target_servings=None, pantry_items=None, equipment=None):
+    context = []
+    if pantry_items:
+        context.append(f"Available pantry: {', '.join(pantry_items)}")
+    if equipment:
+        context.append(f"Available equipment: {equipment}")
+    ctx_str = "\n".join(context)
     prompt = (
         f"Here is the current recipe:\n{recipe_text}\n\n"
         f"Scale this recipe by a factor of {factor}."
@@ -832,6 +862,8 @@ def scale_recipe(recipe_text, factor, target_servings=None):
         "Adjust cook times and equipment sizes if needed. "
         "Keep the same format with all sections."
     )
+    if ctx_str:
+        prompt += f"\n\n---\n\n{ctx_str}\n\nReference what the user already has — flag if they'll need to buy more of something."
     try:
         return _ai_call(prompt, CHEF_PERSONA + "\n\n---\n\nScale the recipe accurately. Return the FULL updated recipe with all ingredient quantities rescaled.", temperature=0.5, max_tokens=4000) or "AI error"
     except Exception as e:
@@ -966,24 +998,26 @@ def categorize_pantry_items(items):
 
 # --- Improvise ---
 
-def generate_improvise_menu(expiring_items, pantry_items, preferences=""):
+def generate_improvise_menu(expiring_items, pantry_items, preferences="", equipment=None):
     items_str = ", ".join(pantry_items) if pantry_items else ""
     expiring_str = ", ".join(expiring_items)
+    equip_str = f"\nKitchen equipment available: {equipment}" if equipment else ""
 
     query = "recipe using " + expiring_str
     web = search_web(query, 5)
 
     prompt = (
-        f"I have these ingredients expiring soon and MUST use at least 75% of them:\n{expiring_str}\n\n"
+        f"I have these ingredients expiring soon — prioritize them:\n{expiring_str}\n\n"
         f"Other available pantry items: {items_str}\n"
-        f"Common staples (always available): {COMMON_STAPLES}\n"
+        f"Common staples (always available): {COMMON_STAPLES}{equip_str}\n"
     )
     if web:
         prompt += f"\nWeb references:\n{web}\n"
     prompt += (
         f"\nUser preferences: {preferences}\n"
-        "Suggest exactly 5 dishes that use at least 75% of the expiring ingredients listed above. "
-        "You can supplement with pantry items and common staples. "
+        "Suggest exactly 5 dishes that ideally use the expiring ingredients. "
+        "You are NOT limited to the pantry — suggest any dish that fits. "
+        "Reference what the user already has where relevant.\n"
         "Return ONLY a JSON array of objects with keys: title (str), description (one line), search_query (str). "
         'Example: [{"title":"Chicken Soup","description":"Hearty soup with chicken and vegetables","search_query":"chicken soup recipe"}]'
     )
