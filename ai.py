@@ -48,7 +48,7 @@ def _extract_json_array(text):
 MAX_TOKENS_CAP = 10000
 
 
-def _ai_call(prompt, system_msg, temperature=0.5, max_tokens=600, return_usage=False):
+def _ai_call(prompt, system_msg, temperature=0.5, max_tokens=600, return_usage=False, history=None):
     global _daily_count, _daily_date
 
     today = date.today()
@@ -61,7 +61,10 @@ def _ai_call(prompt, system_msg, temperature=0.5, max_tokens=600, return_usage=F
 
     max_tokens = min(max_tokens, MAX_TOKENS_CAP)
 
-    msg = [{"role": "system", "content": system_msg}, {"role": "user", "content": prompt}]
+    msg = [{"role": "system", "content": system_msg}]
+    if history:
+        msg.extend(history)
+    msg.append({"role": "user", "content": prompt})
 
     try:
         resp = client.chat.completions.create(
@@ -106,7 +109,7 @@ def _ai_call(prompt, system_msg, temperature=0.5, max_tokens=600, return_usage=F
     return text
 
 
-def _ai_call_groq(prompt, system_msg, temperature=0.5, max_tokens=600):
+def _ai_call_groq(prompt, system_msg, temperature=0.5, max_tokens=600, history=None):
     global _daily_count, _daily_date
 
     today = date.today()
@@ -117,7 +120,10 @@ def _ai_call_groq(prompt, system_msg, temperature=0.5, max_tokens=600):
     if _daily_count >= DAILY_LIMIT:
         raise RuntimeError("AI daily request limit reached (~1,500). Try again after midnight UTC.")
 
-    msg = [{"role": "system", "content": system_msg}, {"role": "user", "content": prompt}]
+    msg = [{"role": "system", "content": system_msg}]
+    if history:
+        msg.extend(history)
+    msg.append({"role": "user", "content": prompt})
     try:
         resp = groq_client.chat.completions.create(
             model=GROQ_MODEL,
@@ -743,7 +749,8 @@ def scan_receipt_from_image(base64_image):
 
 # --- Recipe Follow-up ---
 
-def recipe_followup(recipe_text, user_question, pantry_items=None, equipment=None):
+def recipe_followup(recipe_text, user_question, pantry_items=None, equipment=None, user_id=None):
+    import conversation as _conv
     context = []
     if pantry_items:
         context.append(f"Available pantry: {', '.join(pantry_items)}")
@@ -758,14 +765,20 @@ def recipe_followup(recipe_text, user_question, pantry_items=None, equipment=Non
     )
     if ctx_str:
         prompt += f"\n\n---\n\n{ctx_str}\n\nRelate your answer to what the user already has."
+    history = _conv.get_history(user_id) if user_id else None
     try:
-        return _ai_call(prompt, CHEF_PERSONA + "\n\n---\n\nAnswer the user's question about the current recipe. Be helpful and specific.", temperature=0.5, max_tokens=4000) or "AI error"
+        answer = _ai_call(prompt, CHEF_PERSONA + "\n\n---\n\nAnswer the user's question about the current recipe. Be helpful and specific.", temperature=0.5, max_tokens=4000, history=history) or "AI error"
     except Exception as e:
         logger.exception("recipe_followup failed")
         return "AI error"
+    if user_id:
+        _conv.add_turn(user_id, "user", user_question)
+        _conv.add_turn(user_id, "assistant", answer)
+    return answer
 
 
-def chef_chat(user_message, pantry_items=None, equipment=None):
+def chef_chat(user_message, pantry_items=None, equipment=None, user_id=None):
+    import conversation as _conv
     context = []
     if pantry_items:
         context.append(f"The user has these ingredients in their pantry: {', '.join(pantry_items)}")
@@ -775,11 +788,19 @@ def chef_chat(user_message, pantry_items=None, equipment=None):
     system = CHEF_PERSONA + "\n\n---\n\n" + SINGAPORE_NOTE
     if ctx_str:
         system += f"\n\n---\n\n{ctx_str}\n\nWhen answering, reference what the user already has. Suggest ways to use their available ingredients and equipment."
+    system += ("\n\n---\n\nYou are continuing an ongoing conversation. "
+               "Earlier turns are provided below as context. "
+               "Reference them naturally when the user asks follow-up questions.")
+    history = _conv.get_history(user_id) if user_id else None
     try:
-        return _ai_call(user_message, system, temperature=0.5, max_tokens=4000) or "I'm not sure what to say."
+        answer = _ai_call(user_message, system, temperature=0.5, max_tokens=4000, history=history) or "I'm not sure what to say."
     except Exception as e:
         logger.exception("chef_chat failed")
         return "AI error"
+    if user_id:
+        _conv.add_turn(user_id, "user", user_message)
+        _conv.add_turn(user_id, "assistant", answer)
+    return answer
 
 
 # --- Ingredient Parsing ---

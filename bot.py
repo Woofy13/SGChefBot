@@ -666,6 +666,11 @@ async def improvise(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     _menu_history[user_id] = {d["title"] for d in menu if d.get("title")}
 
+    import conversation as _conv
+    _conv.add_turn(user_id, "user", "[Action] User requested recipes using expiring ingredients", kind="action")
+    titles = [d.get("title", "?") for d in menu if d.get("title")]
+    _conv.add_turn(user_id, "assistant", f"[Chef suggested: {', '.join(titles)}]", kind="action")
+
     lines = ["♻️ *Using expiring ingredients:*"]
     for i, dish in enumerate(menu, 1):
         lines.append(f"\n{i}. {dish.get('title', '?')}")
@@ -699,6 +704,11 @@ async def _do_suggest(update, context, user_id, pantry, pref):
         return
 
     _menu_history[user_id] = {d["title"] for d in menu if d.get("title")}
+
+    import conversation as _conv
+    _conv.add_turn(user_id, "user", "[Action] User requested recipe suggestions", kind="action")
+    titles = [d.get("title", "?") for d in menu if d.get("title")]
+    _conv.add_turn(user_id, "assistant", f"[Chef suggested: {', '.join(titles)}]", kind="action")
 
     lines = ["Here are some ideas ⸜(｡˃ ᵕ ˂ )⸝♡"]
     for i, dish in enumerate(menu, 1):
@@ -817,6 +827,9 @@ async def _elaborate_dish(update, context, user_id, text, dish_index, pantry_ite
     _last_suggestion[user_id] = result
     _is_saved_recipe[user_id] = False
     _pending_cooked[user_id] = dish["title"]
+    import conversation as _conv
+    _conv.add_turn(user_id, "user", f"[Action] User asked to elaborate on {dish.get('title', 'a dish')}", kind="action")
+    _conv.add_turn(user_id, "assistant", result[:800], kind="action")
 
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("💾 Save Recipe", callback_data="save_last"),
@@ -912,6 +925,10 @@ async def suggest_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("Could not generate suggestions. Try being more specific.")
             return
         _menu_history[user_id] = seen | {d["title"] for d in menu if d.get("title")}
+        import conversation as _conv
+        _conv.add_turn(user_id, "user", "[Action] User requested recipe suggestions", kind="action")
+        titles = [d.get("title", "?") for d in menu if d.get("title")]
+        _conv.add_turn(user_id, "assistant", f"[Chef suggested: {', '.join(titles)}]", kind="action")
         lines = ["Here are some ideas ⸜(｡˃ ᵕ ˂ )⸝♡"]
         for i, dish in enumerate(menu, 1):
             lines.append(f"\n{i}. {dish.get('title', '?')}")
@@ -954,6 +971,10 @@ async def suggest_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("Couldn't find recipes for your pantry. Try adding more items.")
             return
         _menu_history[user_id] = seen | {d["title"] for d in menu if d.get("title")}
+        import conversation as _conv
+        _conv.add_turn(user_id, "user", "[Action] User requested recipe suggestions", kind="action")
+        titles = [d.get("title", "?") for d in menu if d.get("title")]
+        _conv.add_turn(user_id, "assistant", f"[Chef suggested: {', '.join(titles)}]", kind="action")
         lines = ["Here are some ideas ⸜(｡˃ ᵕ ˂ )⸝♡"]
         for i, dish in enumerate(menu, 1):
             lines.append(f"\n{i}. {dish.get('title', '?')}")
@@ -1794,6 +1815,11 @@ async def canbake(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     _menu_history[user_id] = {d["title"] for d in menu if d.get("title")}
 
+    import conversation as _conv
+    _conv.add_turn(user_id, "user", "[Action] User requested recipe suggestions from pantry", kind="action")
+    titles = [d.get("title", "?") for d in menu if d.get("title")]
+    _conv.add_turn(user_id, "assistant", f"[Chef suggested: {', '.join(titles)}]", kind="action")
+
     lines = ["Here are some ideas ⸜(｡˃ ᵕ ˂ )⸝♡"]
     for i, dish in enumerate(menu, 1):
         lines.append(f"\n{i}. {dish.get('title', '?')}")
@@ -2318,7 +2344,7 @@ async def _handle_user_text(update, context, user_id, text):
             pantry = db.get_pantry_names(user_id) or []
             equip = db.get_user_preference(user_id, "equipment") or ""
             msg = await update.effective_message.reply_text("Let me answer that... ദ്ദി(˵ •̀ ᴗ - ˵ ) ✧")
-            answer = ai.recipe_followup(recipe, text, pantry_items=pantry, equipment=equip)
+            answer = ai.recipe_followup(recipe, text, pantry_items=pantry, equipment=equip, user_id=user_id)
             sanitized = _sanitize_markdown(answer)
             await msg.edit_text(sanitized, parse_mode="Markdown")
             return
@@ -2563,7 +2589,7 @@ async def _handle_user_text(update, context, user_id, text):
             pantry = db.get_pantry_names(user_id) or []
             equip = db.get_user_preference(user_id, "equipment") or ""
             await msg.edit_text("Let me think about that... (˶˃ ᵕ ˂˶)")
-            answer = ai.chef_chat(text, pantry_items=pantry, equipment=equip)
+            answer = ai.chef_chat(text, pantry_items=pantry, equipment=equip, user_id=user_id)
             await msg.edit_text(_sanitize_markdown(answer), parse_mode="Markdown")
         else:
             await msg.edit_text(reply if reply else
@@ -2714,7 +2740,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pantry = db.get_pantry_names(eff_id) or []
         equip = db.get_user_preference(user_id, "equipment") or ""
         msg = await update.effective_message.reply_text("Let me answer that... ദ്ദി(˵ •̀ ᴗ - ˵ ) ✧")
-        answer = ai.recipe_followup((recipe_text or ""), text, pantry_items=pantry, equipment=equip)
+        answer = ai.recipe_followup((recipe_text or ""), text, pantry_items=pantry, equipment=equip, user_id=eff_id)
         await _send_long_message(update, msg, _sanitize_markdown(answer), None)
         return
 
@@ -4604,7 +4630,7 @@ async def question_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pantry = db.get_pantry_names(eff_id) or []
     equip = db.get_user_preference(user_id, "equipment") or ""
     msg = await update.message.reply_text("Let me think about that... (˶˃ ᵕ ˂˶)")
-    answer = ai.chef_chat(text, pantry_items=pantry, equipment=equip)
+    answer = ai.chef_chat(text, pantry_items=pantry, equipment=equip, user_id=eff_id)
     await _send_long_message(update, msg, _sanitize_markdown(answer), None)
 
 
@@ -4616,6 +4642,13 @@ async def cancel_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _pending_bill_from_parse.pop(user_id, None)
     _asking_question.pop(user_id, None)
     await update.message.reply_text("\u274c Cancelled.")
+
+
+async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    import conversation
+    conversation.clear_history(user_id)
+    await update.message.reply_text("Conversation memory cleared.")
 
 
 async def reload_rulebook(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4808,6 +4841,7 @@ def create_app(token: str):
     app.add_handler(CommandHandler("q", question_command))
     app.add_handler(CallbackQueryHandler(ask_question_callback, pattern="^ask_question$"))
     app.add_handler(CommandHandler("cancel", cancel_pending))
+    app.add_handler(CommandHandler("clear", clear_command))
     app.add_handler(CallbackQueryHandler(parse_callback, pattern="^parse_"))
     app.add_handler(CallbackQueryHandler(bill_callback, pattern="^bill_(confirm|cancel)$"))
     app.add_handler(CallbackQueryHandler(bill_pay_callback, pattern="^bill(pay|due_yes|due_no)_"))
